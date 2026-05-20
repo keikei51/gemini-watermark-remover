@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.16 - 2026-05-21
+
+### Chrome Extension
+
+- Added the extension version to the bottom of the popup so installed builds are easier to identify.
+- Reused fullscreen image session state after Gemini copy actions so refreshed `blob:` images no longer trigger visible page re-processing.
+- Kept copy fallback results in the full-quality session cache so later copy and download actions can reuse the processed image.
+
+### Quality
+
+- Added regression coverage for fullscreen dialog action hints, clipboard fallback caching, and refreshed fullscreen image reuse.
+
 ## 1.0.15 - 2026-05-20
 
 ### Watermark Removal

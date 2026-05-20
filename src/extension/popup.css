@@ -300,8 +300,10 @@ body {
 
 .footer {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid rgba(0, 0, 0, 0.05);
@@ -342,4 +344,12 @@ body {
   color: var(--muted);
   width: 14px;
   height: 14px;
+}
+
+.version-label {
+  min-height: 13px;
+  color: color-mix(in srgb, var(--muted) 78%, transparent);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.25;
 }

@@ -270,6 +270,7 @@ export async function initGeminiWatermarkRemoverUserscript() {
     const disposeClipboardHook = installGeminiClipboardImageHook(targetWindow, {
       getActionContext: () => downloadIntentGate.getRecentActionContext(),
       imageSessionStore: imageSessionStore,
+      onProcessedBlobResolved: handleProcessedBlobResolved,
       onActionCriticalFailure: handleActionCriticalFailure,
       processClipboardImageBlob: (blob, { actionContext } = {}) => (
         processClipboardImageBlobAtBestPath(blob, { actionContext })

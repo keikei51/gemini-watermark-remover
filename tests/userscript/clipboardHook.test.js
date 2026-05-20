@@ -489,6 +489,63 @@ test('installGeminiClipboardImageHook should process the clipboard image payload
   dispose();
 });
 
+test('installGeminiClipboardImageHook should notify when fallback processing produces a full clipboard blob', async () => {
+  const writtenItems = [];
+  const originalClipboardBlob = new Blob(['clipboard-original-cache'], { type: 'image/png' });
+  const processedClipboardBlob = new Blob(['clipboard-processed-cache'], { type: 'image/png' });
+  const actionContext = {
+    action: 'clipboard',
+    sessionKey: 'draft:rc_clipboard_cache',
+    assetIds: {
+      responseId: 'r_clipboard_cache',
+      draftId: 'rc_clipboard_cache',
+      conversationId: 'c_clipboard_cache'
+    }
+  };
+  const clipboard = {
+    async write(items) {
+      writtenItems.push(items);
+    }
+  };
+  const targetWindow = {
+    navigator: { clipboard },
+    ClipboardItem: MockClipboardItem
+  };
+  const notifications = [];
+
+  const dispose = installGeminiClipboardImageHook(targetWindow, {
+    getActionContext: () => actionContext,
+    resolveImageElement: () => null,
+    fetchBlobDirect: async () => {
+      throw new Error('clipboard fallback should process the provided clipboard payload');
+    },
+    processClipboardImageBlob: async (blob) => {
+      assert.equal(await blob.text(), 'clipboard-original-cache');
+      return {
+        processedBlob: processedClipboardBlob
+      };
+    },
+    onProcessedBlobResolved: async (payload) => {
+      notifications.push(payload);
+    },
+    logger: { warn() {} }
+  });
+
+  await clipboard.write([
+    new MockClipboardItem({
+      'image/png': originalClipboardBlob
+    })
+  ]);
+
+  assert.equal(writtenItems.length, 1);
+  assert.equal(await writtenItems[0][0].getType('image/png'), processedClipboardBlob);
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].processedBlob, processedClipboardBlob);
+  assert.equal(notifications[0].actionContext, actionContext);
+
+  dispose();
+});
+
 test('installGeminiClipboardImageHook should reuse an existing full processed session blob without decoding object urls', async () => {
   const writtenItems = [];
   const processedBlob = new Blob(['processed-from-session-blob'], { type: 'image/png' });

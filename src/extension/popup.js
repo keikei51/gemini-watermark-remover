@@ -5,6 +5,11 @@ function getExtensionApi() {
   return globalThis.chrome || null;
 }
 
+function getManifestVersion() {
+  const manifest = getExtensionApi()?.runtime?.getManifest?.();
+  return typeof manifest?.version === 'string' ? manifest.version : '';
+}
+
 function getCurrentActiveTab() {
   return new Promise((resolve) => {
     const extensionApi = getExtensionApi();
@@ -51,6 +56,13 @@ function writeEnabled(enabled, callback) {
 
 document.addEventListener('DOMContentLoaded', () => {
   const toggle = document.getElementById('enable-toggle');
+  const versionLabel = document.getElementById('extension-version');
+
+  if (versionLabel) {
+    const version = getManifestVersion();
+    versionLabel.textContent = version ? `v${version}` : '';
+  }
+
   if (!toggle) return;
 
   readEnabled((enabled) => {

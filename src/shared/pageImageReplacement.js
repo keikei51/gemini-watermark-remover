@@ -35,6 +35,7 @@ const RECENT_SOURCE_HINT_TTL_MS = 5000;
 const MIN_VISIBLE_CAPTURE_EDGE = 32;
 const MIN_VISIBLE_CAPTURE_AREA = MIN_VISIBLE_CAPTURE_EDGE * MIN_VISIBLE_CAPTURE_EDGE;
 const CONTAINER_CAPTURE_AREA_RATIO = 4;
+const GEMINI_FULLSCREEN_CONTAINER_SELECTOR = 'expansion-dialog,[role="dialog"],.image-expansion-dialog-panel,.cdk-overlay-pane';
 const processingOverlayState = new WeakMap();
 const previewOverlayState = new WeakMap();
 const originalAssetUrlRegistry = new Map();
@@ -133,7 +134,7 @@ function readAssetIdsFromImageDataset(imageElement) {
 
 function resolveImageSessionSurfaceType(imageElement) {
   if (typeof imageElement?.closest === 'function') {
-    if (imageElement.closest('expansion-dialog,[role="dialog"],.image-expansion-dialog-panel,.cdk-overlay-pane')) {
+    if (imageElement.closest(GEMINI_FULLSCREEN_CONTAINER_SELECTOR)) {
       return 'fullscreen';
     }
   }
@@ -265,6 +266,7 @@ function resolveHintSourceImageFromEventTarget(target) {
     ? (
       target.closest(getGeminiImageContainerSelector())
       || target.closest('single-image')
+      || target.closest(GEMINI_FULLSCREEN_CONTAINER_SELECTOR)
       || target.closest('[data-test-draft-id]')
     )
     : null;
@@ -2122,6 +2124,34 @@ export function createPageImageReplacementController({
     return false;
   }
 
+  function tryApplySessionProcessedResult(imageElement) {
+    if (!imageElement || typeof imageElement !== 'object') {
+      return false;
+    }
+
+    const assetIds = extractGeminiImageAssetIds(imageElement);
+    const sessionKey = imageSessionStore?.getOrCreateByAssetIds?.(assetIds) || '';
+    if (!sessionKey) {
+      return false;
+    }
+
+    const resource = imageSessionStore?.getBestResource?.(sessionKey, 'display') || null;
+    if (
+      resource?.kind !== 'processed'
+      || !(resource.blob instanceof Blob)
+    ) {
+      return false;
+    }
+
+    applyReadyImageState(imageElement, resource.blob, {
+      imageSessionStore,
+      processedMeta: resource.processedMeta ?? null,
+      processedFrom: resource.source || 'processed',
+      processedSlot: resource.slot === 'full' ? 'full' : 'preview'
+    });
+    return true;
+  }
+
   function cleanupRenderableWait(imageElement) {
     const state = waitingForRenderable.get(imageElement);
     if (!state) return;
@@ -2165,6 +2195,9 @@ export function createPageImageReplacementController({
   async function processImage(imageElement) {
     applyRecentImageSourceHintToImage(imageElement, recentImageSourceHint);
     if (tryApplyRememberedPreviewResult(imageElement)) {
+      return;
+    }
+    if (tryApplySessionProcessedResult(imageElement)) {
       return;
     }
     const currentSourceUrl = String(resolveCandidateImageUrl(imageElement) || '').trim();

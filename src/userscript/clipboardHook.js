@@ -240,6 +240,7 @@ export function installGeminiClipboardImageHook(targetWindow, {
   resolveImageElement = null,
   imageSessionStore = getDefaultImageSessionStore(),
   onActionCriticalFailure = null,
+  onProcessedBlobResolved = null,
   processClipboardImageBlob = null,
   fetchBlobDirect = async (url) => {
     const response = await fetch(url);
@@ -286,11 +287,17 @@ export function installGeminiClipboardImageHook(targetWindow, {
       } catch (error) {
         clipboardResolutionError = error;
       }
-      if (!processedBlob && requiresOriginalGeminiBlob && clipboardResolutionError) {
+      if (!processedBlob && requiresOriginalGeminiBlob) {
         processedBlob = await processClipboardImageBlobFallback(items, {
           processClipboardImageBlob,
           actionContext
         });
+        if (processedBlob && typeof onProcessedBlobResolved === 'function') {
+          await onProcessedBlobResolved({
+            actionContext,
+            processedBlob
+          });
+        }
       }
       if (!processedBlob) {
         if (requiresOriginalGeminiBlob) {

@@ -2412,6 +2412,173 @@ test('createPageImageReplacementController should reuse clicked preview source f
   });
 });
 
+test('createPageImageReplacementController should reuse fullscreen dialog source hints from action buttons', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const listeners = new Map();
+    const targetDocument = {
+      readyState: 'complete',
+      body: {},
+      documentElement: {},
+      querySelectorAll() {
+        return [];
+      },
+      addEventListener(type, listener) {
+        listeners.set(type, listener);
+      },
+      removeEventListener(type) {
+        listeners.delete(type);
+      }
+    };
+    globalThis.MutationObserver = class {
+      observe() {}
+      disconnect() {}
+    };
+
+    const fullscreenSourceImage = new MockHTMLImageElement();
+    fullscreenSourceImage.dataset = {
+      gwrSourceUrl: 'https://lh3.googleusercontent.com/gg/fullscreen-token=s1024-rj',
+      gwrResponseId: 'r_fullscreen_hint',
+      gwrDraftId: 'rc_fullscreen_hint',
+      gwrConversationId: 'c_fullscreen_hint'
+    };
+    fullscreenSourceImage.src = 'blob:https://gemini.google.com/fullscreen-processed';
+    fullscreenSourceImage.currentSrc = fullscreenSourceImage.src;
+    fullscreenSourceImage.naturalWidth = 1024;
+    fullscreenSourceImage.naturalHeight = 559;
+    fullscreenSourceImage.clientWidth = 951;
+    fullscreenSourceImage.clientHeight = 519;
+    fullscreenSourceImage.closest = (selector) => {
+      if (selector === 'generated-image,.generated-image-container') return {};
+      if (selector === 'expansion-dialog,[role="dialog"],.image-expansion-dialog-panel,.cdk-overlay-pane') return fullscreenDialog;
+      return null;
+    };
+
+    const fullscreenDialog = {
+      querySelector(selector) {
+        return selector === 'img' ? fullscreenSourceImage : null;
+      }
+    };
+
+    const refreshedFullscreenImage = new MockHTMLImageElement();
+    refreshedFullscreenImage.dataset = {};
+    refreshedFullscreenImage.src = 'blob:https://gemini.google.com/fullscreen-refreshed';
+    refreshedFullscreenImage.currentSrc = refreshedFullscreenImage.src;
+    refreshedFullscreenImage.naturalWidth = 1024;
+    refreshedFullscreenImage.naturalHeight = 559;
+    refreshedFullscreenImage.clientWidth = 951;
+    refreshedFullscreenImage.clientHeight = 519;
+    refreshedFullscreenImage.complete = true;
+    refreshedFullscreenImage.style = {};
+    refreshedFullscreenImage.closest = (selector) => {
+      if (selector === 'generated-image,.generated-image-container') return {};
+      if (selector === 'expansion-dialog,[role="dialog"],.image-expansion-dialog-panel,.cdk-overlay-pane') return fullscreenDialog;
+      return null;
+    };
+
+    const seenSources = [];
+    const controller = createPageImageReplacementController({
+      logger: createSilentLogger(),
+      targetDocument,
+      processPageImageSourceImpl: async ({ sourceUrl }) => {
+        seenSources.push(sourceUrl);
+        return {
+          skipped: true,
+          reason: 'test-stop'
+        };
+      }
+    });
+
+    controller.install();
+    listeners.get('pointerdown')?.({
+      target: {
+        closest(selector) {
+          return selector === 'expansion-dialog,[role="dialog"],.image-expansion-dialog-panel,.cdk-overlay-pane'
+            ? fullscreenDialog
+            : null;
+        }
+      }
+    });
+
+    controller.processRoot({
+      querySelectorAll() {
+        return [refreshedFullscreenImage];
+      }
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(seenSources, ['https://lh3.googleusercontent.com/gg/fullscreen-token=s1024-rj']);
+    assert.equal(refreshedFullscreenImage.dataset.gwrSourceUrl, 'https://lh3.googleusercontent.com/gg/fullscreen-token=s1024-rj');
+    assert.equal(refreshedFullscreenImage.dataset.gwrDraftId, 'rc_fullscreen_hint');
+    controller.dispose();
+  });
+});
+
+test('createPageImageReplacementController should reuse full processed session blobs for refreshed fullscreen images', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const imageSessionStore = createImageSessionStore();
+    const sessionKey = imageSessionStore.getOrCreateByAssetIds({
+      responseId: 'r_fullscreen_full_cache',
+      draftId: 'rc_fullscreen_full_cache',
+      conversationId: 'c_fullscreen_full_cache'
+    });
+    const fullProcessedBlob = new Blob(['fullscreen-full-processed'], { type: 'image/png' });
+    imageSessionStore.updateProcessedResult(sessionKey, {
+      slot: 'full',
+      objectUrl: 'blob:https://gemini.google.com/full-cache',
+      blob: fullProcessedBlob,
+      blobType: 'image/png',
+      processedFrom: 'original-clipboard'
+    });
+
+    const fullscreenImage = new MockHTMLImageElement();
+    fullscreenImage.dataset = {
+      gwrResponseId: 'r_fullscreen_full_cache',
+      gwrDraftId: 'rc_fullscreen_full_cache',
+      gwrConversationId: 'c_fullscreen_full_cache'
+    };
+    fullscreenImage.src = 'blob:https://gemini.google.com/fullscreen-refreshed-after-copy';
+    fullscreenImage.currentSrc = fullscreenImage.src;
+    fullscreenImage.naturalWidth = 1024;
+    fullscreenImage.naturalHeight = 559;
+    fullscreenImage.clientWidth = 951;
+    fullscreenImage.clientHeight = 519;
+    fullscreenImage.complete = true;
+    fullscreenImage.style = {};
+    fullscreenImage.closest = (selector) => {
+      if (selector === 'generated-image,.generated-image-container') return {};
+      if (selector === 'expansion-dialog,[role="dialog"],.image-expansion-dialog-panel,.cdk-overlay-pane') return {};
+      return null;
+    };
+
+    let processCalls = 0;
+    const controller = createPageImageReplacementController({
+      logger: createSilentLogger(),
+      imageSessionStore,
+      processPageImageSourceImpl: async () => {
+        processCalls += 1;
+        return {
+          skipped: true,
+          reason: 'should-not-process'
+        };
+      }
+    });
+
+    controller.processRoot({
+      querySelectorAll() {
+        return [fullscreenImage];
+      }
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(processCalls, 0);
+    assert.equal(fullscreenImage.dataset.gwrPageImageState, 'ready');
+    assert.equal(fullscreenImage.dataset.gwrWatermarkObjectUrl, `blob:mock:${fullProcessedBlob.size}`);
+    controller.dispose();
+  });
+});
+
 test('createPageImageReplacementController should reuse remembered original asset urls for fullscreen blob images when clicked preview only exposes asset ids', async () => {
   await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
     const listeners = new Map();
