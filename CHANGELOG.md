@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.17 - 2026-06-07
+
+### Watermark Removal
+
+- Added support for the newly observed Gemini 48px watermark at the 96px right/bottom anchor.
+- Added prioritized alpha-strength selection so the new weak-alpha chain tries 60% strength first and falls back to the standard 100% chain when needed.
+- Kept legacy 96px and 192px-margin candidates evidence-gated so older and full-size outputs continue to resolve safely.
+
+### Quality
+
+- Added 2026-06-07 regression samples covering the weak-alpha 48px/96px-anchor output.
+- Re-verified the current sample benchmark set with all 23 samples passing.
+
 ## 1.0.16 - 2026-05-21
 
 ### Chrome Extension
