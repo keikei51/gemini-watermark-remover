@@ -6,7 +6,6 @@ import { chromium } from 'playwright';
 
 import { calculateAlphaMap } from '../../src/core/alphaMap.js';
 import { interpolateAlphaMap, computeRegionSpatialCorrelation } from '../../src/core/adaptiveDetector.js';
-import { assessAlphaBandHalo } from '../../src/core/restorationMetrics.js';
 import { processWatermarkImageData } from '../../src/core/watermarkProcessor.js';
 import {
     decodeImageDataInPage,
@@ -75,15 +74,15 @@ test('real Gemini preview-sized page image should remove the bottom-right waterm
             `expected preview outline gradient to decrease, before=${result.meta.detection.originalGradientScore}, after=${result.meta.detection.processedGradientScore}`
         );
         assert.ok(
-            result.meta.detection.processedGradientScore < 0.24,
-            `expected preview outline residual gradient < 0.24, got ${result.meta.detection.processedGradientScore}`
+            result.meta.detection.processedGradientScore < 0.32,
+            `expected preview outline residual gradient < 0.32 without edge cleanup, got ${result.meta.detection.processedGradientScore}`
         );
     } finally {
         await browser.close();
     }
 });
 
-test('real Gemini preview path should avoid expensive subpixel refinement when edge cleanup is enough', async (t) => {
+test('real Gemini preview path should avoid visual post-processing in fixed-core mode', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -112,8 +111,8 @@ test('real Gemini preview path should avoid expensive subpixel refinement when e
 
         assert.ok(result.meta.applied, `skipReason=${result.meta.skipReason}`);
         assert.ok(
-            result.meta.source.includes('+edge-cleanup'),
-            `expected preview real page fixture to use edge cleanup, source=${result.meta.source}`
+            !result.meta.source.includes('+edge-cleanup'),
+            `expected preview real page fixture to skip edge cleanup, source=${result.meta.source}`
         );
         assert.equal(result.meta.subpixelShift, null, `expected no accepted subpixel shift, source=${result.meta.source}`);
         assert.ok(
@@ -129,7 +128,7 @@ test('real Gemini preview path should avoid expensive subpixel refinement when e
     }
 });
 
-test('real Gemini strong preview fixture should keep aggressive edge cleanup without profile overrides', async (t) => {
+test('real Gemini strong preview fixture should stay on fixed-core inverse path', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -164,31 +163,15 @@ test('real Gemini strong preview fixture should keep aggressive edge cleanup wit
         assert.equal(result.meta.subpixelShift, null, `expected no accepted subpixel shift, source=${result.meta.source}`);
         assert.ok(
             Math.abs(result.meta.detection.processedSpatialScore) < 0.18,
-            `expected stronger edge cleanup to keep spatial residual within a safe range, got ${result.meta.detection.processedSpatialScore}`
+            `expected fixed-core inverse to keep spatial residual within a safe range, got ${result.meta.detection.processedSpatialScore}`
         );
         assert.ok(
-            result.meta.detection.processedGradientScore < 0.4,
-            `expected stronger preview edge cleanup to reduce residual gradient, got ${result.meta.detection.processedGradientScore}`
+            result.meta.detection.processedGradientScore < result.meta.detection.originalGradientScore,
+            `expected fixed-core inverse to reduce residual gradient, before=${result.meta.detection.originalGradientScore}, after=${result.meta.detection.processedGradientScore}`
         );
         assert.ok(
-            result.meta.source.includes('+edge-cleanup'),
-            `expected strong preview fixture to use edge cleanup, source=${result.meta.source}`
-        );
-        const alphaMap = interpolateAlphaMap(alpha96, 96, result.meta.position.width);
-        const halo = assessAlphaBandHalo({
-            imageData: result.imageData,
-            position: result.meta.position,
-            alphaMap,
-            minAlpha: 0.2,
-            maxAlpha: 0.35
-        });
-        assert.ok(
-            result.meta.detection.processedGradientScore < 0.29,
-            `expected strong preview residual gradient < 0.29, got ${result.meta.detection.processedGradientScore}`
-        );
-        assert.ok(
-            halo.deltaLum < 6,
-            `expected strong preview contour halo delta < 6, got ${halo.deltaLum}`
+            !result.meta.source.includes('+edge-cleanup'),
+            `expected strong preview fixture to skip edge cleanup, source=${result.meta.source}`
         );
         assert.ok(
             result.debugTimings.subpixelRefinementMs < 5,

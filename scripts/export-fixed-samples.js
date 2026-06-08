@@ -104,11 +104,13 @@ function resolveFixedOutputDir(inputDir) {
 export async function exportFixedSamples(inputDir, { overwrite = true } = {}) {
     const bg48Path = path.resolve('src/assets/bg_48.png');
     const bg96Path = path.resolve('src/assets/bg_96.png');
+    const bg96LegacyPath = path.resolve('src/assets/bg_96_20260520.png');
     const files = await listInputImages(inputDir);
     const results = [];
 
     const alpha48 = calculateAlphaMap(await decodeImageDataInNode(bg48Path));
     const alpha96 = calculateAlphaMap(await decodeImageDataInNode(bg96Path));
+    const alpha96Legacy = calculateAlphaMap(await decodeImageDataInNode(bg96LegacyPath));
     const alphaResolver = (size) => {
         if (size === 48) return alpha48;
         if (size === 96) return alpha96;
@@ -121,7 +123,9 @@ export async function exportFixedSamples(inputDir, { overwrite = true } = {}) {
         const processed = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 4,
+            alpha96Variants: {
+                '20260520': alpha96Legacy
+            },
             getAlphaMap: alphaResolver
         });
         const outputBuffer = await encodeImageDataToBuffer(processed.imageData, filePath);

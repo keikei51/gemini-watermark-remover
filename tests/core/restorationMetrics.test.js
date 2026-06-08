@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+    assessRemovalDiffArtifacts,
     assessReferenceTextureAlignment,
     assessReferenceTextureAlignmentFromStats,
     calculateNearBlackRatio,
@@ -112,4 +113,63 @@ test('calculateNearBlackRatio should count only near-black pixels inside the tar
     });
 
     assert.equal(ratio, 0.5);
+});
+
+test('assessRemovalDiffArtifacts should identify ideal inverse-alpha removal shape', () => {
+    const width = 8;
+    const height = 8;
+    const position = { x: 2, y: 2, width: 4, height: 4 };
+    const alphaMap = new Float32Array([
+        0, 0.2, 0.2, 0,
+        0.2, 0.5, 0.5, 0.2,
+        0.2, 0.5, 0.5, 0.2,
+        0, 0.2, 0.2, 0
+    ]);
+    const originalImageData = {
+        width,
+        height,
+        data: new Uint8ClampedArray(width * height * 4)
+    };
+    const candidateImageData = {
+        width,
+        height,
+        data: new Uint8ClampedArray(width * height * 4)
+    };
+
+    for (let index = 0; index < originalImageData.data.length; index += 4) {
+        originalImageData.data[index] = 80;
+        originalImageData.data[index + 1] = 80;
+        originalImageData.data[index + 2] = 80;
+        originalImageData.data[index + 3] = 255;
+        candidateImageData.data[index] = 80;
+        candidateImageData.data[index + 1] = 80;
+        candidateImageData.data[index + 2] = 80;
+        candidateImageData.data[index + 3] = 255;
+    }
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const alpha = alphaMap[row * position.width + col];
+            const pixelIndex = ((position.y + row) * width + position.x + col) * 4;
+            const watermarked = Math.round(80 * (1 - alpha) + 255 * alpha);
+            originalImageData.data[pixelIndex] = watermarked;
+            originalImageData.data[pixelIndex + 1] = watermarked;
+            originalImageData.data[pixelIndex + 2] = watermarked;
+        }
+    }
+
+    const artifacts = assessRemovalDiffArtifacts({
+        originalImageData,
+        candidateImageData,
+        alphaMap,
+        position,
+        alphaGain: 1
+    });
+
+    assert.ok(artifacts.recomposeError < 0.01, `recomposeError=${artifacts.recomposeError}`);
+    assert.ok(
+        artifacts.diffTemplateCorrelation > 0.95,
+        `diffTemplateCorrelation=${artifacts.diffTemplateCorrelation}`
+    );
+    assert.equal(artifacts.negativeDiffRatio, 0);
 });

@@ -109,7 +109,6 @@ export async function calibratePreviewAlphaPairs({
             alpha48,
             alpha96,
             adaptiveMode: 'never',
-            maxPasses: 4,
             getAlphaMap
         });
         const position = processed.meta.position;

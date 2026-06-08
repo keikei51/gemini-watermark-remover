@@ -1,5 +1,22 @@
 # 更新日志
 
+## 1.0.18 - 2026-06-08
+
+### 水印移除
+
+- 将 Gemini 固定核心去水印链路重构为按优先级选择位置和 alpha 候选，不再依赖 multipass 或视觉后处理作为默认成功路径。
+- 新增基于 before/after diff 派生的伪影评分，让 alpha 选择同时考虑残留边缘、halo 和新增裁剪像素，但不把 diff 当成唯一判据。
+- 新增 2026-06-08 回归样例，覆盖最新 Gemini 48px 水印变化和弱 alpha 调整结果。
+
+### Chrome 插件
+
+- 将官方 Chrome 插件发布包移动到顶层 `release/` 目录，同时保留 `dist/extension` 作为本地调试版未打包插件。
+
+### 质量
+
+- 记录固定核心算法复盘和后续演进方向，包括 candidate ranking report、gold set manifest 与 catalog 驱动维护。
+- 重新完成全量测试、生产构建、样例 artifact 生成和插件发布包生成验证。
+
 ## 1.0.17 - 2026-06-07
 
 ### 水印移除

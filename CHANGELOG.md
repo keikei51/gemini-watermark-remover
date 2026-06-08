@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.18 - 2026-06-08
+
+### Watermark Removal
+
+- Reworked the fixed-core Gemini watermark path around prioritized position and alpha candidates instead of multipass or visual post-processing.
+- Added diff-derived artifact scoring so alpha selection can account for residual edges, halo, and newly clipped pixels without treating before/after diff as the only signal.
+- Added 2026-06-08 regression samples covering the latest Gemini 48px watermark variants and refined weak-alpha outcomes.
+
+### Chrome Extension
+
+- Moved official extension release packages to the top-level `release/` directory while keeping the unpacked local debugging extension in `dist/extension`.
+
+### Quality
+
+- Documented the fixed-core algorithm findings and the next evolution plan for candidate ranking reports, gold-set manifests, and catalog-driven maintenance.
+- Re-verified the release with full tests, production build, sample artifact generation, and extension package generation.
+
 ## 1.0.17 - 2026-06-07
 
 ### Watermark Removal

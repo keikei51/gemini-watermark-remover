@@ -298,7 +298,6 @@ test('createUserscriptRuntimeProcessor should allow detached removeWatermarkFrom
 
   assert.equal(await processedBlob.text(), 'processed');
   assert.deepEqual(receivedOptions, {
-    adaptiveMode: 'never',
-    maxPasses: 2
+    adaptiveMode: 'never'
   });
 });

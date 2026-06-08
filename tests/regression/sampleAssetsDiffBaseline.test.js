@@ -297,7 +297,6 @@ test('sample assets should match local fix-directory baselines when they are pre
                     const result = processWatermarkImageData(imageData, {
                         alpha48,
                         alpha96,
-                        maxPasses: 4,
                         getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
                     });
                     const actualImageData = item.compareMode === 'raw'

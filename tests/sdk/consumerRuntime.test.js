@@ -43,8 +43,7 @@ const imageData = {
 };
 
 const syncResult = removeWatermarkFromImageDataSync(imageData, {
-    adaptiveMode: 'never',
-    maxPasses: 1
+    adaptiveMode: 'never'
 });
 
 const bufferResult = await removeWatermarkFromBuffer(
@@ -70,8 +69,7 @@ const bufferResult = await removeWatermarkFromBuffer(
                 data: Array.from(output.data)
             }));
         },
-        adaptiveMode: 'never',
-        maxPasses: 1
+        adaptiveMode: 'never'
     }
 );
 

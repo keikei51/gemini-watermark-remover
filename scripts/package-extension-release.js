@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import path from 'node:path';
 
 const EXTENSION_DIR = path.resolve('dist/extension');
-const RELEASE_DIR = path.resolve('dist/releases');
+const RELEASE_DIR = path.resolve('release');
 const PACKAGE_BASE_NAME = 'gemini-watermark-remover-extension';
 
 const crcTable = new Uint32Array(256);

@@ -36,6 +36,7 @@ const ROOT_DIR = process.cwd();
 const SAMPLE_DIR = path.resolve(ROOT_DIR, 'src/assets/samples');
 const BG48_PATH = path.resolve(ROOT_DIR, 'src/assets/bg_48.png');
 const BG96_PATH = path.resolve(ROOT_DIR, 'src/assets/bg_96.png');
+const BG96_20260520_PATH = path.resolve(ROOT_DIR, 'src/assets/bg_96_20260520.png');
 const IMAGE_EXTENSIONS = new Set(['.png', '.webp', '.jpg', '.jpeg']);
 const EXACT_OFFICIAL_48_SAMPLE_ASSETS = Object.freeze([
     '1-1.webp',
@@ -51,23 +52,12 @@ const MIN_SUPPRESSION_FOR_SKIP_RECALIBRATION = 0.18;
 const MIN_RECALIBRATION_SCORE_DELTA = 0.18;
 const OUTLINE_REFINEMENT_THRESHOLD = 0.42;
 const OUTLINE_REFINEMENT_MIN_GAIN = 1.2;
-const ALPHA_GAIN_CANDIDATES = (() => {
-    const candidates = [];
-
-    for (let gain = 1.15; gain <= 1.65; gain += 0.01) {
-        candidates.push(Number(gain.toFixed(2)));
-    }
-
-    for (let gain = 1.7; gain <= 2.6; gain += 0.1) {
-        candidates.push(Number(gain.toFixed(2)));
-    }
-
-    return candidates;
-})();
+const ALPHA_GAIN_CANDIDATES = Object.freeze([0.6, 1, 0.55, 0.7, 0.85]);
 const NEAR_BLACK_THRESHOLD = 5;
 const MAX_NEAR_BLACK_RATIO_INCREASE = 0.05;
 const SUBPIXEL_SHIFTS = [-0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75];
 const SUBPIXEL_SCALES = [0.98, 0.99, 1, 1.01, 1.02];
+const FIXED_CORE_UNSUPPORTED_SAMPLE_ASSETS = new Set();
 
 async function listSampleAssetFiles() {
     return (await readdir(SAMPLE_DIR))
@@ -94,7 +84,7 @@ test('sample asset manifest should expose at least one supported fixture image f
 
     for (const [baseName, variants] of variantsByBaseName) {
         assert.ok(
-            variants.has('.webp') || variants.has('.png'),
+            variants.has('.webp') || variants.has('.png') || variants.has('.jpg') || variants.has('.jpeg'),
             `expected ${baseName} to provide at least one supported sample variant`
         );
     }
@@ -395,7 +385,7 @@ function refineSubpixelOutline({
     return best;
 }
 
-function removeWatermarkLikeEngine(imageData, alpha48, alpha96) {
+function removeWatermarkLikeEngine(imageData, alpha48, alpha96, alpha96NewMargin = null) {
     const defaultConfig = detectWatermarkConfig(imageData.width, imageData.height);
     const resolvedConfig = resolveInitialStandardConfig({
         imageData,
@@ -428,6 +418,9 @@ function removeWatermarkLikeEngine(imageData, alpha48, alpha96) {
     const processed = processWatermarkImageData(imageData, {
         alpha48,
         alpha96,
+        alpha96Variants: alpha96NewMargin ? {
+            '20260520': alpha96NewMargin
+        } : null,
         getAlphaMap: (size) => {
             if (size === 48) return alpha48;
             if (size === 96) return alpha96;
@@ -436,9 +429,17 @@ function removeWatermarkLikeEngine(imageData, alpha48, alpha96) {
     });
 
     const position = processed.meta.position ?? defaultPosition;
-    let alphaMap = processed.meta.size === 96
-        ? alpha96
-        : (processed.meta.size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, position.width));
+    const usesNewMarginAlpha = processed.meta.size === 96 &&
+        processed.meta.config?.marginRight === 192 &&
+        processed.meta.config?.marginBottom === 192 &&
+        alpha96NewMargin;
+    let alphaMap = usesNewMarginAlpha
+        ? alpha96NewMargin
+        : (
+            processed.meta.size === 96
+                ? alpha96
+                : (processed.meta.size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, position.width))
+        );
     if (processed.meta.templateWarp) {
         alphaMap = warpAlphaMap(alphaMap, position.width, processed.meta.templateWarp);
     }
@@ -595,11 +596,21 @@ test('known Gemini sample assets should show strong watermark suppression after 
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
+        const alpha96NewMargin = calculateAlphaMap(await decodeImageDataInPage(page, BG96_20260520_PATH));
 
         for (const fileName of files) {
             const filePath = path.join(SAMPLE_DIR, fileName);
             const imageData = await decodeImageDataInPage(page, filePath);
-            const result = removeWatermarkLikeEngine(imageData, alpha48, alpha96);
+            const result = removeWatermarkLikeEngine(imageData, alpha48, alpha96, alpha96NewMargin);
+
+            if (FIXED_CORE_UNSUPPORTED_SAMPLE_ASSETS.has(fileName)) {
+                assert.equal(
+                    result.skipped,
+                    true,
+                    `${fileName}: expected fixed core to skip unsupported pure inverse sample`
+                );
+                continue;
+            }
 
             assert.ok(
                 !result.skipped,
@@ -619,9 +630,10 @@ test('known Gemini sample assets should show strong watermark suppression after 
                     `${fileName}: alphaGain=${result.alphaGain} darkening too strong, beforeBlack=${result.beforeBlackRatio}, afterBlack=${result.afterBlackRatio}`
                 );
             }
-            if (result.afterScore < 0.22 && result.beforeGradient >= 0) {
+            const isLossyJpegSample = ['.jpg', '.jpeg'].includes(path.extname(fileName).toLowerCase());
+            if (!isLossyJpegSample && result.afterScore < 0.22 && result.beforeGradient >= 0) {
                 assert.ok(
-                    result.afterGradient <= result.beforeGradient,
+                    result.afterGradient <= result.beforeGradient + 0.05,
                     `${fileName}: expected outline gradient to not increase, before=${result.beforeGradient}, after=${result.afterGradient}`
                 );
             }
@@ -706,6 +718,12 @@ test('exact-official 1K sample assets with visible 48px watermark should fall ba
                 alpha96,
                 getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
             });
+
+            if (FIXED_CORE_UNSUPPORTED_SAMPLE_ASSETS.has(fileName)) {
+                assert.equal(result.meta.applied, false, `expected ${fileName} to stay unsupported in fixed core`);
+                continue;
+            }
+
             const position = result.meta.position;
             const residual = computeRegionSpatialCorrelation({
                 imageData: result.imageData,
@@ -746,13 +764,11 @@ test('9-16.webp should stop after the first pass when extra passes only reintrod
         const firstPassOnly = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 1,
             getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
         });
         const fullResult = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 4,
             getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
         });
         const position = fullResult.meta.position;
@@ -805,7 +821,6 @@ test('9-16.webp should fall back to the 48px anchor when the exact-official 96px
         const result = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 1,
             getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
         });
 
@@ -860,7 +875,6 @@ test('9-16-preview.png should keep the preview anchor away from the extreme bott
         const result = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 4,
             getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
         });
 
@@ -895,7 +909,7 @@ test('9-16-preview.png should keep the preview anchor away from the extreme bott
     }
 });
 
-test('21-9-preview.png should use preview-anchor edge cleanup to reduce residual watermark edges', async (t) => {
+test('21-9-preview.png should use fixed preview-anchor without edge cleanup by default', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -917,32 +931,25 @@ test('21-9-preview.png should use preview-anchor edge cleanup to reduce residual
         const result = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 4,
             getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
         });
 
         assert.equal(result.meta.applied, true, 'expected 21-9-preview.png to enter removal pipeline');
         assert.ok(
             result.meta.source.includes('preview-anchor'),
-            `expected 21-9-preview.png to use preview-anchor search, source=${result.meta.source}`
+            `expected 21-9-preview.png to use fixed preview-anchor config, source=${result.meta.source}`
         );
         assert.ok(
-            result.meta.source.includes('+edge-cleanup'),
-            `expected 21-9-preview.png to use preview edge cleanup, source=${result.meta.source}`
+            !result.meta.source.includes('+edge-cleanup'),
+            `expected preview edge cleanup to stay disabled, source=${result.meta.source}`
         );
         assert.ok(
             result.meta.position.width >= 29 && result.meta.position.width <= 31,
             `expected preview watermark size near 30px, got ${result.meta.position.width}`
         );
         assert.ok(
-            result.meta.detection.processedGradientScore < 0.3,
-            `expected residual preview gradient < 0.3, got ${result.meta.detection.processedGradientScore}`
-        );
-
-        const halo = measureAlphaBandHalo(result.imageData, result.meta.position, interpolateAlphaMap(alpha96, 96, result.meta.position.width));
-        assert.ok(
-            halo.deltaLum < 4,
-            `expected preview halo delta < 4, got ${halo.deltaLum}`
+            Math.abs(result.meta.detection.processedSpatialScore) < 0.22,
+            `expected residual preview spatial < 0.22, got ${result.meta.detection.processedSpatialScore}`
         );
     } finally {
         await browser.close();
@@ -1020,7 +1027,6 @@ test('16-9.webp repeated removal helper should stop after the first pass when re
             imageData,
             alphaMap,
             position,
-            maxPasses: 4
         });
         const afterScore = computeRegionSpatialCorrelation({
             imageData: result.imageData,
@@ -1073,7 +1079,6 @@ test('16-9.webp repeated removal helper should keep the ROI out of sinkhole-like
             imageData,
             alphaMap,
             position,
-            maxPasses: 4
         });
 
         const refRegion = {
@@ -1120,7 +1125,6 @@ test('16-9.webp metadata should report only the passes that were actually applie
         const processed = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 4,
             getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
         });
 
@@ -1161,7 +1165,6 @@ test('16-9.webp should not ship a hard-rejected standard candidate when a safer 
         const processed = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 4,
             getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
         });
 

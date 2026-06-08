@@ -13,6 +13,66 @@ const DEFAULT_HALO_MIN_ALPHA = 0.12;
 const DEFAULT_HALO_MAX_ALPHA = 0.35;
 const DEFAULT_HALO_OUTSIDE_ALPHA_MAX = 0.01;
 const DEFAULT_HALO_OUTER_MARGIN = 3;
+const DIFF_NEGATIVE_THRESHOLD = 1 / 255;
+const DIFF_CLIP_ORIGINAL_THRESHOLD = 5;
+const DIFF_CLIP_CANDIDATE_THRESHOLD = 0;
+const RECOMPOSE_MAX_ALPHA = 0.99;
+const DIFF_DARK_HALO_VISUAL_WEIGHT = 0.004;
+const DIFF_NEW_CLIP_VISUAL_WEIGHT = 0.5;
+
+function meanAndVariance(values) {
+    let sum = 0;
+    for (let i = 0; i < values.length; i++) {
+        sum += values[i];
+    }
+    const mean = values.length > 0 ? sum / values.length : 0;
+
+    let sq = 0;
+    for (let i = 0; i < values.length; i++) {
+        const delta = values[i] - mean;
+        sq += delta * delta;
+    }
+
+    return {
+        mean,
+        variance: values.length > 0 ? sq / values.length : 0
+    };
+}
+
+function normalizedCorrelation(a, b) {
+    if (a.length !== b.length || a.length === 0) return 0;
+
+    const statsA = meanAndVariance(a);
+    const statsB = meanAndVariance(b);
+    const den = Math.sqrt(statsA.variance * statsB.variance) * a.length;
+    if (den < 1e-8) return 0;
+
+    let num = 0;
+    for (let i = 0; i < a.length; i++) {
+        num += (a[i] - statsA.mean) * (b[i] - statsB.mean);
+    }
+
+    return num / den;
+}
+
+function sobelMagnitude(values, width, height) {
+    const out = new Float32Array(width * height);
+
+    for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+            const i = y * width + x;
+            const gx =
+                -values[i - width - 1] - 2 * values[i - 1] - values[i + width - 1] +
+                values[i - width + 1] + 2 * values[i + 1] + values[i + width + 1];
+            const gy =
+                -values[i - width - 1] - 2 * values[i - width] - values[i - width + 1] +
+                values[i + width - 1] + 2 * values[i + width] + values[i + width + 1];
+            out[i] = Math.sqrt(gx * gx + gy * gy);
+        }
+    }
+
+    return out;
+}
 
 export function cloneImageData(imageData) {
     if (typeof ImageData !== 'undefined' && imageData instanceof ImageData) {
@@ -146,6 +206,112 @@ export function assessAlphaBandHalo({
         deltaLum,
         positiveDeltaLum: Math.max(0, deltaLum),
         visibility
+    };
+}
+
+export function assessRemovalDiffArtifacts({
+    originalImageData,
+    candidateImageData,
+    alphaMap,
+    position,
+    alphaGain = 1
+}) {
+    if (!originalImageData || !candidateImageData || !alphaMap || !position) {
+        return null;
+    }
+
+    const total = position.width * position.height;
+    if (total <= 0) return null;
+
+    const positiveDiff = new Float32Array(total);
+    const signedDiff = new Float32Array(total);
+    const candidateLum = new Float32Array(total);
+    const gainedAlpha = new Float32Array(total);
+    let negativeDiffCount = 0;
+    let newlyClippedCount = 0;
+    let recomposeError = 0;
+    let weightedRecomposeError = 0;
+    let recomposeCount = 0;
+
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const localIndex = row * position.width + col;
+            const pixelIndex = ((position.y + row) * originalImageData.width + position.x + col) * 4;
+            const beforeR = originalImageData.data[pixelIndex];
+            const beforeG = originalImageData.data[pixelIndex + 1];
+            const beforeB = originalImageData.data[pixelIndex + 2];
+            const afterR = candidateImageData.data[pixelIndex];
+            const afterG = candidateImageData.data[pixelIndex + 1];
+            const afterB = candidateImageData.data[pixelIndex + 2];
+            const beforeLum = 0.2126 * beforeR + 0.7152 * beforeG + 0.0722 * beforeB;
+            const afterLum = 0.2126 * afterR + 0.7152 * afterG + 0.0722 * afterB;
+            const diff = (beforeLum - afterLum) / 255;
+            const alpha = Math.min(RECOMPOSE_MAX_ALPHA, Math.max(0, alphaMap[localIndex] * alphaGain));
+
+            positiveDiff[localIndex] = Math.max(0, diff);
+            signedDiff[localIndex] = diff;
+            candidateLum[localIndex] = afterLum / 255;
+            gainedAlpha[localIndex] = alpha;
+
+            if (diff < -DIFF_NEGATIVE_THRESHOLD) {
+                negativeDiffCount++;
+            }
+            if (
+                (
+                    afterR <= DIFF_CLIP_CANDIDATE_THRESHOLD &&
+                    beforeR > DIFF_CLIP_ORIGINAL_THRESHOLD
+                ) ||
+                (
+                    afterG <= DIFF_CLIP_CANDIDATE_THRESHOLD &&
+                    beforeG > DIFF_CLIP_ORIGINAL_THRESHOLD
+                ) ||
+                (
+                    afterB <= DIFF_CLIP_CANDIDATE_THRESHOLD &&
+                    beforeB > DIFF_CLIP_ORIGINAL_THRESHOLD
+                )
+            ) {
+                newlyClippedCount++;
+            }
+
+            for (const [before, after] of [[beforeR, afterR], [beforeG, afterG], [beforeB, afterB]]) {
+                const recomposed = after * (1 - alpha) + 255 * alpha;
+                const error = Math.abs(recomposed - before) / 255;
+                recomposeError += error;
+                weightedRecomposeError += error * Math.max(0.02, alpha);
+                recomposeCount++;
+            }
+        }
+    }
+
+    const alphaGradient = sobelMagnitude(gainedAlpha, position.width, position.height);
+    const diffGradient = sobelMagnitude(positiveDiff, position.width, position.height);
+    const candidateGradient = sobelMagnitude(candidateLum, position.width, position.height);
+    const scores = scoreRegion(candidateImageData, alphaMap, position);
+    const halo = assessAlphaBandHalo({
+        imageData: candidateImageData,
+        position,
+        alphaMap
+    });
+    const newlyClippedRatio = newlyClippedCount / total;
+    const visualArtifactCost =
+        Math.abs(scores.spatialScore) * 0.25 +
+        Math.max(0, scores.gradientScore) +
+        Math.max(0, -halo.deltaLum) * DIFF_DARK_HALO_VISUAL_WEIGHT +
+        newlyClippedRatio * DIFF_NEW_CLIP_VISUAL_WEIGHT;
+
+    return {
+        spatialScore: scores.spatialScore,
+        gradientScore: scores.gradientScore,
+        recomposeError: recomposeError / Math.max(1, recomposeCount),
+        weightedRecomposeError: weightedRecomposeError / Math.max(1, recomposeCount),
+        diffTemplateCorrelation: normalizedCorrelation(positiveDiff, gainedAlpha),
+        signedDiffTemplateCorrelation: normalizedCorrelation(signedDiff, gainedAlpha),
+        diffGradientCorrelation: normalizedCorrelation(diffGradient, alphaGradient),
+        candidateGradientCorrelation: normalizedCorrelation(candidateGradient, alphaGradient),
+        negativeDiffRatio: negativeDiffCount / total,
+        newlyClippedRatio,
+        halo,
+        visualArtifactCost
     };
 }
 

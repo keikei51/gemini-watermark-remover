@@ -27,8 +27,7 @@ test('removeWatermarkFromImageData should work without caller-provided alpha map
     applySyntheticWatermark(imageData, alpha48, position, 1);
 
     const result = await mod.removeWatermarkFromImageData(imageData, {
-        adaptiveMode: 'never',
-        maxPasses: 1
+        adaptiveMode: 'never'
     });
 
     assert.equal(result.imageData.width, 320);
@@ -51,8 +50,7 @@ test('removeWatermarkFromImageDataSync should work without caller-provided alpha
     applySyntheticWatermark(imageData, alpha48, position, 1);
 
     const result = mod.removeWatermarkFromImageDataSync(imageData, {
-        adaptiveMode: 'never',
-        maxPasses: 1
+        adaptiveMode: 'never'
     });
 
     assert.equal(result.imageData.width, 320);

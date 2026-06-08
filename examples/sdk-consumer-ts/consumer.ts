@@ -19,8 +19,7 @@ const imageData: ImageDataLike = {
 
 const enginePromise = createWatermarkEngine();
 const result = removeWatermarkFromImageDataSync(imageData, {
-    adaptiveMode: 'never',
-    maxPasses: 1
+    adaptiveMode: 'never'
 });
 const manualMeta: WatermarkMeta = {
     applied: false,

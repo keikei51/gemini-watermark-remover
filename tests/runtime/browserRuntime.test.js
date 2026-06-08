@@ -96,13 +96,13 @@ test('createBrowserRuntimeProcessor should default adaptiveMode to always', asyn
     }
   });
 
-  const result = await runtime.processWatermarkBlob(inputBlob, { maxPasses: 2 });
+  const result = await runtime.processWatermarkBlob(inputBlob);
 
   assert.equal(result.processedBlob.type, 'image/png');
   assert.deepEqual(calls, [
     {
       blob: inputBlob,
-      options: { adaptiveMode: 'always', maxPasses: 2 }
+      options: { adaptiveMode: 'always' }
     }
   ]);
 });
@@ -127,7 +127,7 @@ test('createBrowserRuntimeProcessor should allow adaptiveMode override', async (
   assert.deepEqual(calls, [
     {
       blob: inputBlob,
-      options: { adaptiveMode: 'never', maxPasses: 1 }
+      options: { adaptiveMode: 'never' }
     }
   ]);
 });
@@ -154,8 +154,7 @@ test('createBrowserRuntimeProcessor should allow detached removeWatermarkFromBlo
 
   assert.equal(await processedBlob.text(), 'processed');
   assert.deepEqual(receivedOptions, {
-    adaptiveMode: 'never',
-    maxPasses: 2
+    adaptiveMode: 'never'
   });
 });
 
@@ -235,8 +234,7 @@ test('createBrowserRuntimeProcessor should honor createEngine and defaultOptions
       {
         image: removeCalls[0].image,
         options: {
-          adaptiveMode: 'always',
-          maxPasses: 3
+          adaptiveMode: 'always'
         }
       }
     ]);

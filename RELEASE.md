@@ -7,7 +7,7 @@ This repository currently ships four release surfaces:
 - website build in `dist/`
 - userscript bundle in `dist/userscript/gemini-watermark-remover.user.js`
 - package/sdk source and metadata from `package.json`, `src/core/`, and `src/sdk/`
-- Chrome Web Store listing plus fallback package in `dist/releases/gemini-watermark-remover-extension-v<version>.zip`
+- Chrome Web Store listing plus fallback package in `release/gemini-watermark-remover-extension-v<version>.zip`
 
 ## Preflight
 
@@ -27,8 +27,8 @@ Expected result:
 - `dist/userscript/gemini-watermark-remover.user.js` is regenerated
 - package/sdk entrypoints in `package.json` still match the published source layout
 - generated userscript metadata uses the current `package.json` version
-- Chrome extension release zip, sha256 file, and `latest-extension.json` are regenerated in `dist/releases/` for GitHub Release and manual fallback installs
-- the unpacked extension in `dist/extension` is a local test build; the official release manifest is written only into the zip in `dist/releases/`
+- Chrome extension release zip, sha256 file, and `latest-extension.json` are regenerated in `release/` for GitHub Release and manual fallback installs
+- the unpacked extension in `dist/extension` is a local test build; the official release manifest is written only into the zip in `release/`
 
 ## Release Metadata
 
@@ -53,7 +53,7 @@ Expected result:
 - commit release changes
 - create a git tag matching the package version, for example `v1.0.1`
 - create a GitHub Release from that tag and upload the built userscript from `dist/userscript/gemini-watermark-remover.user.js`
-- upload `dist/releases/gemini-watermark-remover-extension-v<version>.zip`, its `.sha256.txt` file, and `latest-extension.json` to GitHub Release as the manual fallback package
+- upload `release/gemini-watermark-remover-extension-v<version>.zip`, its `.sha256.txt` file, and `latest-extension.json` to GitHub Release as the manual fallback package
 - submit the Chrome extension package to Chrome Web Store, or confirm the already-approved listing is serving the intended version
 - publish the sdk package only if this release includes package-facing changes
 
@@ -62,9 +62,9 @@ Example GitHub Release command:
 ```bash
 gh release create v<version> \
   dist/userscript/gemini-watermark-remover.user.js \
-  dist/releases/gemini-watermark-remover-extension-v<version>.zip \
-  dist/releases/gemini-watermark-remover-extension-v<version>.zip.sha256.txt \
-  dist/releases/latest-extension.json \
+  release/gemini-watermark-remover-extension-v<version>.zip \
+  release/gemini-watermark-remover-extension-v<version>.zip.sha256.txt \
+  release/latest-extension.json \
   --repo GargantuaX/gemini-watermark-remover \
   --title "v<version>" \
   --notes "<release notes>" \

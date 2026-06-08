@@ -91,7 +91,6 @@ export interface WatermarkMeta {
 
 export interface RemoveOptions {
     adaptiveMode?: 'auto' | 'always' | 'never' | 'off';
-    maxPasses?: number;
     engine?: WatermarkEngine;
     alpha48?: Float32Array;
     alpha96?: Float32Array;

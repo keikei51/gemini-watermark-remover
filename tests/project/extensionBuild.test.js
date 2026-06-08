@@ -92,12 +92,12 @@ test('extension package should replace the local debug manifest with the officia
   });
   assert.equal(packageBuild.status, 0, packageBuild.stderr || packageBuild.stdout);
 
-  const latest = JSON.parse(await readText('dist/releases/latest-extension.json'));
+  const latest = JSON.parse(await readText('release/latest-extension.json'));
   assert.equal(latest.name, 'gemini-watermark-remover-extension');
   assert.equal(latest.source, 'dist/extension');
-  assert.equal(existsSync(new URL('../../dist/releases/latest-extension-local.json', import.meta.url)), false);
+  assert.equal(existsSync(new URL('../../release/latest-extension-local.json', import.meta.url)), false);
 
-  const zipText = (await readBinary(`dist/releases/${latest.file}`)).toString('utf8');
+  const zipText = (await readBinary(`release/${latest.file}`)).toString('utf8');
   assert.match(zipText, /"name": "Gemini Watermark Remover"/);
   assert.match(zipText, /"short_name": "GWR"/);
   assert.match(zipText, /"default_title": "Gemini Watermark Remover"/);
@@ -114,7 +114,7 @@ test('production build should preserve packaged extension release artifacts', as
   });
   assert.equal(packageBuild.status, 0, packageBuild.stderr || packageBuild.stdout);
 
-  const latestBefore = await readText('dist/releases/latest-extension.json');
+  const latestBefore = await readText('release/latest-extension.json');
   const latest = JSON.parse(latestBefore);
 
   const build = spawnSync('pnpm', ['build'], {
@@ -124,9 +124,9 @@ test('production build should preserve packaged extension release artifacts', as
   });
   assert.equal(build.status, 0, build.stderr || build.stdout);
 
-  assert.equal(existsSync(new URL(`../../dist/releases/${latest.file}`, import.meta.url)), true);
-  assert.equal(existsSync(new URL(`../../dist/releases/${latest.file}.sha256.txt`, import.meta.url)), true);
-  assert.equal(existsSync(new URL('../../dist/releases/latest-extension.json', import.meta.url)), true);
-  assert.equal(existsSync(new URL('../../dist/releases/latest-extension-local.json', import.meta.url)), false);
-  assert.equal(await readText('dist/releases/latest-extension.json'), latestBefore);
+  assert.equal(existsSync(new URL(`../../release/${latest.file}`, import.meta.url)), true);
+  assert.equal(existsSync(new URL(`../../release/${latest.file}.sha256.txt`, import.meta.url)), true);
+  assert.equal(existsSync(new URL('../../release/latest-extension.json', import.meta.url)), true);
+  assert.equal(existsSync(new URL('../../release/latest-extension-local.json', import.meta.url)), false);
+  assert.equal(await readText('release/latest-extension.json'), latestBefore);
 });

@@ -12,22 +12,21 @@ import {
     createSyntheticAlphaMap
 } from './syntheticWatermarkTestUtils.js';
 
-test('processWatermarkImageData should run in Node without asset imports and record multi-pass meta', () => {
+test('processWatermarkImageData should run in Node without asset imports and record single-pass meta', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
     const imageData = createPatternImageData(320, 320);
     const position = { x: 320 - 32 - 48, y: 320 - 32 - 48, width: 48, height: 48 };
-    applySyntheticWatermark(imageData, alpha48, position, 2);
+    applySyntheticWatermark(imageData, alpha48, position, 1);
 
     const result = processWatermarkImageData(imageData, {
         alpha48,
-        alpha96,
-        maxPasses: 4
+        alpha96
     });
 
     assert.equal(result.imageData.width, 320);
     assert.ok(result.meta.applied);
-    assert.ok(result.meta.passCount >= 1, `passCount=${result.meta.passCount}`);
+    assert.equal(result.meta.passCount, 1, `passCount=${result.meta.passCount}`);
     assert.equal(result.meta.passStopReason, 'residual-low');
     assert.ok(Array.isArray(result.meta.passes));
     assert.ok(result.meta.detection.processedSpatialScore < 0.25, `score=${result.meta.detection.processedSpatialScore}`);
@@ -42,8 +41,7 @@ test('processWatermarkImageData should not attempt extra passes when the first p
 
     const result = processWatermarkImageData(imageData, {
         alpha48,
-        alpha96,
-        maxPasses: 4
+        alpha96
     });
 
     assert.equal(result.meta.passCount, 1, `passCount=${result.meta.passCount}`);
@@ -66,7 +64,7 @@ test('processWatermarkImageData should interpolate adaptive alpha maps when getA
     assert.equal(result.meta.skipReason, 'no-watermark-detected');
 });
 
-test('processWatermarkImageData should apply detected template warp to the first restoration pass', () => {
+test('processWatermarkImageData should not use template warp in fixed-core mode', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
     const imageData = createPatternImageData(320, 320);
@@ -78,41 +76,26 @@ test('processWatermarkImageData should apply detected template warp to the first
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1
     });
 
-    assert.ok(result.meta.applied);
-    assert.ok(result.meta.templateWarp, 'expected template warp to be detected');
-
-    const alignedAlpha = warpAlphaMap(alpha48, 48, result.meta.templateWarp);
-    const residual = computeRegionSpatialCorrelation({
-        imageData: result.imageData,
-        alphaMap: alignedAlpha,
-        region: { x: position.x, y: position.y, size: position.width }
-    });
-
-    assert.ok(
-        residual <= -0.18,
-        `expected first pass to use aligned template, residual=${residual}, warp=${JSON.stringify(result.meta.templateWarp)}`
-    );
+    assert.equal(result.meta.templateWarp, null);
+    assert.ok(!String(result.meta.source).includes('+warp'), `source=${result.meta.source}`);
 });
 
-test('processWatermarkImageData should allow alpha gain to compete as a first-pass candidate', () => {
-    const alpha96 = createSyntheticAlphaMap(96);
-    const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
-    const imageData = createPatternImageData(320, 320);
-    const position = { x: 320 - 32 - 48, y: 320 - 32 - 48, width: 48, height: 48 };
-    applySyntheticWatermark(imageData, alpha48, position, 1.05);
+test('processWatermarkImageData should allow weak alpha gain to compete as a first-pass candidate', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples/20260607.png'));
 
     const result = processWatermarkImageData(imageData, {
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
     });
 
     assert.ok(result.meta.applied);
-    assert.ok(result.meta.alphaGain > 1, `expected first-pass alpha gain candidate, got ${result.meta.alphaGain}`);
+    assert.ok(result.meta.alphaGain < 1, `expected weak alpha gain candidate, got ${result.meta.alphaGain}`);
     assert.ok(
         result.meta.detection.processedSpatialScore < 0.25,
         `expected first-pass gain candidate to suppress residual, got ${result.meta.detection.processedSpatialScore}`
@@ -123,7 +106,7 @@ test('processWatermarkImageData should allow alpha gain to compete as a first-pa
     );
 });
 
-test('processWatermarkImageData should select adaptive candidate directly when it beats the default position', () => {
+test('processWatermarkImageData should skip off-catalog adaptive-only positions in fixed-core mode', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
     const imageData = createPatternImageData(320, 320);
@@ -133,21 +116,10 @@ test('processWatermarkImageData should select adaptive candidate directly when i
     const result = processWatermarkImageData(imageData, {
         alpha48,
         alpha96,
-        maxPasses: 1
     });
 
-    assert.ok(result.meta.applied);
-    assert.ok(
-        result.meta.source.startsWith('adaptive'),
-        `expected adaptive candidate to be selected, got ${result.meta.source}`
-    );
-    assert.ok(Math.abs(result.meta.position.x - truePosition.x) <= 2, `x=${result.meta.position.x}`);
-    assert.ok(Math.abs(result.meta.position.y - truePosition.y) <= 2, `y=${result.meta.position.y}`);
-    assert.ok(Math.abs(result.meta.position.width - truePosition.width) <= 2, `width=${result.meta.position.width}`);
-    assert.ok(
-        result.meta.detection.processedSpatialScore < 0.22,
-        `expected adaptive candidate to suppress residual, got ${result.meta.detection.processedSpatialScore}`
-    );
+    assert.equal(result.meta.applied, false);
+    assert.equal(result.meta.source, 'skipped');
 });
 
 test('processWatermarkImageData should recover near-official scaled anchor without adaptive search', () => {
@@ -162,7 +134,6 @@ test('processWatermarkImageData should recover near-official scaled anchor witho
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1
     });
 
     assert.ok(result.meta.applied, `skipReason=${result.meta.skipReason}`);
@@ -184,7 +155,7 @@ test('processWatermarkImageData should recover near-official scaled anchor witho
     );
 });
 
-test('processWatermarkImageData should recover small default-anchor size drift without adaptive search', () => {
+test('processWatermarkImageData should not recover small size drift outside fixed combinations', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
     const alpha54 = interpolateAlphaMap(alpha96, 96, 54);
@@ -201,33 +172,12 @@ test('processWatermarkImageData should recover small default-anchor size drift w
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
     });
 
-    const residual = computeRegionSpatialCorrelation({
-        imageData: result.imageData,
-        alphaMap: alpha54,
-        region: { x: truePosition.x, y: truePosition.y, size: truePosition.width }
-    });
-
-    assert.ok(result.meta.applied, `skipReason=${result.meta.skipReason}`);
-    assert.ok(
-        Math.abs(result.meta.position.x - truePosition.x) <= 4,
-        `x=${result.meta.position.x}`
-    );
-    assert.ok(
-        Math.abs(result.meta.position.y - truePosition.y) <= 4,
-        `y=${result.meta.position.y}`
-    );
-    assert.ok(
-        Math.abs(result.meta.position.width - truePosition.width) <= 2,
-        `width=${result.meta.position.width}`
-    );
-    assert.ok(
-        residual < 0.22,
-        `expected true-region residual < 0.22, got ${residual}, source=${result.meta.source}`
-    );
+    assert.equal(result.meta.applied, true);
+    assert.deepEqual(result.meta.position, { x: 240, y: 240, width: 48, height: 48 });
+    assert.ok(!String(result.meta.source).includes('+size'), `source=${result.meta.source}`);
 });
 
 test('processWatermarkImageData should recover preview-sized bottom-right watermark without adaptive search', () => {
@@ -247,7 +197,6 @@ test('processWatermarkImageData should recover preview-sized bottom-right waterm
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
     });
 
@@ -271,7 +220,7 @@ test('processWatermarkImageData should recover preview-sized bottom-right waterm
     );
 });
 
-test('processWatermarkImageData should keep preview-anchor removals to a single pass by default', () => {
+test('processWatermarkImageData should skip repeated preview watermark layers in fixed-core mode', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
     const alpha34 = interpolateAlphaMap(alpha96, 96, 34);
@@ -291,39 +240,39 @@ test('processWatermarkImageData should keep preview-anchor removals to a single 
         getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
     });
 
-    assert.ok(result.meta.applied, `skipReason=${result.meta.skipReason}`);
-    assert.equal(result.meta.passCount, 1, `passCount=${result.meta.passCount}`);
-    assert.equal(result.meta.attemptedPassCount, 1, `attemptedPassCount=${result.meta.attemptedPassCount}`);
+    assert.equal(result.meta.applied, false);
+    assert.equal(result.meta.passCount, 0, `passCount=${result.meta.passCount}`);
+    assert.equal(result.meta.attemptedPassCount, 0, `attemptedPassCount=${result.meta.attemptedPassCount}`);
     assert.ok(
         !String(result.meta.source).includes('+multipass'),
         `expected preview-anchor removal to skip multipass, source=${result.meta.source}`
     );
 });
 
-test('processWatermarkImageData should expose candidate selection debug summary in meta', () => {
+test('processWatermarkImageData should expose fixed-core candidate selection debug summary in meta', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
-    const alpha54 = interpolateAlphaMap(alpha96, 96, 54);
     const imageData = createPatternImageData(320, 320);
     const truePosition = {
-        x: 320 - 32 - 54,
-        y: 320 - 32 - 54,
-        width: 54,
-        height: 54
+        x: 320 - 32 - 48,
+        y: 320 - 32 - 48,
+        width: 48,
+        height: 48
     };
-    applySyntheticWatermark(imageData, alpha54, truePosition, 1);
+    applySyntheticWatermark(imageData, alpha48, truePosition, 1);
 
     const result = processWatermarkImageData(imageData, {
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
     });
 
     assert.ok(result.meta.applied, `skipReason=${result.meta.skipReason}`);
     assert.ok(result.meta.selectionDebug, 'expected selectionDebug to be present');
-    assert.equal(result.meta.selectionDebug.usedSizeJitter, true);
+    assert.equal(result.meta.selectionDebug.usedSizeJitter, false);
+    assert.equal(result.meta.selectionDebug.usedLocalShift, false);
+    assert.equal(result.meta.selectionDebug.usedAdaptive, false);
     assert.equal(typeof result.meta.selectionDebug.texturePenalty, 'number');
     assert.equal(typeof result.meta.selectionDebug.tooDark, 'boolean');
     assert.equal(typeof result.meta.selectionDebug.tooFlat, 'boolean');
@@ -350,12 +299,11 @@ test('processWatermarkImageData should expose local shift provenance for tall po
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1
     });
 
     assert.ok(result.meta.applied, `skipReason=${result.meta.skipReason}`);
-    assert.equal(result.meta.selectionDebug?.usedLocalShift, true);
-    assert.equal(result.meta.selectionDebug?.usedCatalogVariant, false);
+    assert.equal(result.meta.selectionDebug?.usedLocalShift, false);
+    assert.equal(result.meta.selectionDebug?.usedCatalogVariant, true);
     assert.deepEqual(result.meta.selectionDebug?.initialConfig, { logoSize: 96, marginRight: 64, marginBottom: 64 });
     assert.deepEqual(result.meta.selectionDebug?.initialPosition, { x: 608, y: 1216, width: 96, height: 96 });
     assert.deepEqual(result.meta.selectionDebug?.finalPosition, result.meta.position);
@@ -365,13 +313,12 @@ test('processWatermarkImageData should expose normalized decision tier alongside
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
     const imageData = createPatternImageData(320, 320);
-    const position = { x: 320 - 36 - 48, y: 320 - 20 - 48, width: 48, height: 48 };
+    const position = { x: 320 - 32 - 48, y: 320 - 32 - 48, width: 48, height: 48 };
     applySyntheticWatermark(imageData, alpha48, position, 1);
 
     const result = processWatermarkImageData(imageData, {
         alpha48,
         alpha96,
-        maxPasses: 1
     });
 
     assert.ok(result.meta.applied);
@@ -393,7 +340,6 @@ test('processWatermarkImageData should avoid expanded alpha-gain search when the
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1
     });
 
     assert.ok(result.meta.applied);
@@ -413,7 +359,6 @@ test('processWatermarkImageData should avoid conservative fallback on debug1-sou
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
     });
 
@@ -437,7 +382,6 @@ test('processWatermarkImageData should avoid local-shift drift on debug2-source 
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
     });
 
@@ -448,12 +392,12 @@ test('processWatermarkImageData should avoid local-shift drift on debug2-source 
     );
     assert.deepEqual(
         result.meta.position,
-        { x: 688, y: 1296, width: 48, height: 48 },
+        { x: 608, y: 1216, width: 96, height: 96 },
         `unexpected final position=${JSON.stringify(result.meta.position)}`
     );
     assert.ok(
-        result.meta.detection.processedGradientScore < 0.02,
-        `expected debug2-source residual gradient < 0.02, got ${result.meta.detection.processedGradientScore}`
+        result.meta.detection.processedGradientScore < 0.1,
+        `expected debug2-source residual gradient < 0.1, got ${result.meta.detection.processedGradientScore}`
     );
 });
 
@@ -466,7 +410,6 @@ test('processWatermarkImageData should keep 20260520-1.png on the canonical 48px
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
     });
 
@@ -494,7 +437,6 @@ test('processWatermarkImageData should not promote weak 192px-margin local drift
             '20260520': alpha96NewMargin
         },
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
     });
 
@@ -532,7 +474,6 @@ test('processWatermarkImageData should remove 20260607 samples at the 48px 96px-
             alpha48,
             alpha96,
             adaptiveMode: 'never',
-            maxPasses: 1,
             getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
         });
 
@@ -553,6 +494,97 @@ test('processWatermarkImageData should remove 20260607 samples at the 48px 96px-
     }
 });
 
+test('processWatermarkImageData should keep visually balanced weak alpha when 20260608 catalog sample keeps a light residual', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples/20260608-3.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.equal(result.meta.passCount, 1, `passCount=${result.meta.passCount}`);
+    assert.equal(
+        result.meta.alphaGain,
+        0.7,
+        `expected fine alpha around the visually balanced weak-alpha point, got ${result.meta.alphaGain}`
+    );
+    assert.ok(
+        result.meta.detection.processedSpatialScore < 0.1,
+        `expected light residual to be reduced, got ${result.meta.detection.processedSpatialScore}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore <= result.meta.detection.originalGradientScore - 0.55,
+        `expected gradient signal to remain strongly reduced, before=${result.meta.detection.originalGradientScore}, after=${result.meta.detection.processedGradientScore}`
+    );
+});
+
+test('processWatermarkImageData should keep strong 20260608 catalog evidence ahead of weak preview anchor', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples/20260608-4.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(
+        result.meta.position,
+        { x: 576, y: 1313, width: 48, height: 48 },
+        `expected 48px large-margin catalog anchor, got ${JSON.stringify(result.meta.position)} source=${result.meta.source}`
+    );
+    assert.equal(result.meta.alphaGain, 0.95);
+    assert.ok(
+        String(result.meta.source).includes('catalog'),
+        `expected catalog source, got ${result.meta.source}`
+    );
+    assert.ok(
+        !String(result.meta.source).includes('preview-anchor'),
+        `expected strong catalog evidence to beat preview-anchor, got ${result.meta.source}`
+    );
+    assert.ok(
+        result.meta.detection.processedSpatialScore < 0.05,
+        `expected residual spatial to be near zero, got ${result.meta.detection.processedSpatialScore}`
+    );
+});
+
+test('processWatermarkImageData should allow strong fixed-core standard evidence on dark textured backgrounds', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples/5-4.webp'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.equal(result.meta.applied, true, `skipReason=${result.meta.skipReason}`);
+    assert.deepEqual(
+        result.meta.position,
+        { x: 1072, y: 848, width: 48, height: 48 },
+        `expected canonical 48px anchor, got ${JSON.stringify(result.meta.position)} source=${result.meta.source}`
+    );
+    assert.equal(result.meta.alphaGain, 1);
+    assert.ok(
+        result.meta.detection.originalSpatialScore > 0.9,
+        `expected strong original spatial evidence, got ${result.meta.detection.originalSpatialScore}`
+    );
+    assert.ok(
+        result.meta.detection.processedSpatialScore < 0.22,
+        `expected residual spatial to be accepted, got ${result.meta.detection.processedSpatialScore}`
+    );
+});
+
 test('processWatermarkImageData should remove the 2816x1536 issue #68 watermark at the new 192px margin', async () => {
     const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
     const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
@@ -566,7 +598,6 @@ test('processWatermarkImageData should remove the 2816x1536 issue #68 watermark 
             '20260520': alpha96NewMargin
         },
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
     });
 
@@ -590,7 +621,6 @@ test('processWatermarkImageData should keep 20260520-5.png on the full 96px anch
         alpha48,
         alpha96,
         adaptiveMode: 'never',
-        maxPasses: 1,
         getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
     });
 

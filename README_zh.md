@@ -211,7 +211,6 @@ import {
 ```javascript
 const result = await removeWatermarkFromImageData(imageData, {
   adaptiveMode: 'auto',
-  maxPasses: 4,
 });
 
 console.log(result.meta.decisionTier);

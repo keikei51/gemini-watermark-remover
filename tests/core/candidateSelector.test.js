@@ -84,6 +84,49 @@ test('selectInitialCandidate should not require eager adaptive search when the s
     assert.equal(result.position.y, position.y);
 });
 
+test('selectInitialCandidate should not use automatic preview-anchor search outside fixed combinations', () => {
+    const alpha96 = createSyntheticAlphaMap(96);
+    const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
+    const alpha36 = interpolateAlphaMap(alpha96, 96, 36);
+    const imageData = createPatternImageData(400, 400);
+    const config = {
+        logoSize: 48,
+        marginRight: 32,
+        marginBottom: 32
+    };
+    const position = {
+        x: imageData.width - config.marginRight - config.logoSize,
+        y: imageData.height - config.marginBottom - config.logoSize,
+        width: config.logoSize,
+        height: config.logoSize
+    };
+    const unsupportedPreviewPosition = {
+        x: imageData.width - 32 - 36,
+        y: imageData.height - 32 - 36,
+        width: 36,
+        height: 36
+    };
+
+    applySyntheticWatermark(imageData, alpha36, unsupportedPreviewPosition, 1);
+
+    const result = selectInitialCandidate({
+        originalImageData: imageData,
+        config,
+        position,
+        alpha48,
+        alpha96,
+        getAlphaMap: (size) => size === 36 ? alpha36 : null,
+        allowAdaptiveSearch: false,
+        allowAutomaticSearch: false,
+        alphaGainCandidates: [0.6, 1, 0.7, 0.85, 0.55],
+        alphaPriorityGains: [0.6, 1]
+    });
+
+    assert.equal(result.selectedTrial, null);
+    assert.equal(result.source, 'skipped');
+    assert.equal(result.decisionTier, 'insufficient');
+});
+
 test('evaluateRestorationCandidate should add texture penalty when restoration becomes darker than the local reference region', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);

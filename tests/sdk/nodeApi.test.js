@@ -42,8 +42,7 @@ test('removeWatermarkFromBuffer should support pluggable Node decode and encode 
         mimeType: 'image/png',
         decodeImageData: decodeSyntheticImageData,
         encodeImageData: encodeSyntheticImageData,
-        adaptiveMode: 'never',
-        maxPasses: 1
+        adaptiveMode: 'never'
     });
 
     assert.ok(Buffer.isBuffer(result.buffer));
@@ -69,8 +68,7 @@ test('removeWatermarkFromFile should read input and optionally write output', as
         outputPath,
         decodeImageData: decodeSyntheticImageData,
         encodeImageData: encodeSyntheticImageData,
-        adaptiveMode: 'never',
-        maxPasses: 1
+        adaptiveMode: 'never'
     });
 
     const saved = await readFile(outputPath);

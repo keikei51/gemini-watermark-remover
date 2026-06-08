@@ -58,9 +58,11 @@ function normalizeProcessorResult(result, processorPath = 'main-thread') {
 }
 
 function normalizeProcessingOptions(options = {}) {
+  const { maxPasses: _ignoredMaxPasses, ...normalizedOptions } =
+    options && typeof options === 'object' ? options : {};
   return {
     adaptiveMode: 'always',
-    ...(options && typeof options === 'object' ? options : {})
+    ...normalizedOptions
   };
 }
 

@@ -25,6 +25,11 @@ const GEMINI_3X_CURRENT_1K_LARGE_MARGIN_WATERMARK_CONFIG = Object.freeze({
     marginRight: 96,
     marginBottom: 96
 });
+const KNOWN_FIXED_GEMINI_WATERMARK_CONFIGS_BY_SIZE = Object.freeze({
+    '1408x768': Object.freeze([
+        Object.freeze({ logoSize: 46, marginRight: 32, marginBottom: 32, fixedVariant: true })
+    ])
+});
 
 // Gemini image generation does not emit arbitrary dimensions.
 // The models use a discrete set of official sizes, so the catalog is a better
@@ -204,6 +209,15 @@ function isOfficialOrKnownGeminiDimensions(width, height) {
     return matchOfficialGeminiImageSize(width, height) !== null;
 }
 
+function resolveKnownFixedGeminiWatermarkConfigs(width, height) {
+    const normalizedWidth = normalizeDimension(width);
+    const normalizedHeight = normalizeDimension(height);
+    if (!normalizedWidth || !normalizedHeight) return [];
+
+    const configs = KNOWN_FIXED_GEMINI_WATERMARK_CONFIGS_BY_SIZE[`${normalizedWidth}x${normalizedHeight}`];
+    return Array.isArray(configs) ? configs.map((config) => ({ ...config })) : [];
+}
+
 export function resolveOfficialGeminiSearchConfigs(
     width,
     height,
@@ -311,6 +325,7 @@ export function resolveGeminiWatermarkSearchConfigs(width, height, defaultConfig
     if (defaultConfig) {
         configs.push(defaultConfig);
     }
+    configs.push(...resolveKnownFixedGeminiWatermarkConfigs(width, height));
     configs.push(...resolveOfficialGeminiSearchConfigs(width, height));
     const currentLargeMarginVariant = createCurrentLargeMarginVariantConfig(defaultConfig, width, height);
     if (currentLargeMarginVariant) {

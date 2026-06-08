@@ -211,7 +211,6 @@ Use the pure-data API when you already have decoded `ImageData`:
 ```javascript
 const result = await removeWatermarkFromImageData(imageData, {
   adaptiveMode: 'auto',
-  maxPasses: 4,
 });
 
 console.log(result.meta.decisionTier);

@@ -5,10 +5,14 @@ import {
 } from '../shared/imageProcessing.js';
 
 function normalizeProcessingOptions(defaultOptions = {}, options = {}) {
+  const { maxPasses: _ignoredMaxPasses, ...normalizedDefaultOptions } =
+    defaultOptions && typeof defaultOptions === 'object' ? defaultOptions : {};
+  const { maxPasses: _ignoredCallMaxPasses, ...normalizedOptions } =
+    options && typeof options === 'object' ? options : {};
   return {
     adaptiveMode: 'always',
-    ...(defaultOptions && typeof defaultOptions === 'object' ? defaultOptions : {}),
-    ...(options && typeof options === 'object' ? options : {})
+    ...normalizedDefaultOptions,
+    ...normalizedOptions
   };
 }
 

@@ -166,7 +166,7 @@ test('createCachedCanvasProcessor should cache engine creation and normalize opt
     },
     {
       image: renderable,
-      options: { adaptiveMode: 'always', maxPasses: 2 }
+      options: { adaptiveMode: 'always' }
     }
   ]);
 });
@@ -208,7 +208,7 @@ test('createCachedImageProcessor should cache engine creation across calls', asy
     },
     {
       image: renderable,
-      options: { adaptiveMode: 'always', maxPasses: 2 }
+      options: { adaptiveMode: 'always' }
     }
   ]);
 });
@@ -274,7 +274,7 @@ test('createSharedBlobProcessor should fallback to main-thread when worker path 
     },
     processMainThread: async (blob, options) => {
       assert.equal(blob, inputBlob);
-      assert.deepEqual(options, { adaptiveMode: 'always', maxPasses: 1 });
+      assert.deepEqual(options, { adaptiveMode: 'always' });
       return {
         processedBlob: new Blob(['main-thread'], { type: 'image/png' }),
         processedMeta: { source: 'main-thread' }
@@ -287,7 +287,7 @@ test('createSharedBlobProcessor should fallback to main-thread when worker path 
   assert.deepEqual(workerCalls, [
     {
       blob: inputBlob,
-      options: { adaptiveMode: 'always', maxPasses: 1 }
+      options: { adaptiveMode: 'always' }
     }
   ]);
   assert.deepEqual(fallbackErrors, [workerError]);

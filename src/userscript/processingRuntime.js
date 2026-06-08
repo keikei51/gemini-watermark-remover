@@ -135,9 +135,11 @@ export function createUserscriptProcessingRuntime({
   const timingDebugEnabled = isTimingDebugEnabled(env);
 
   function normalizeProcessingOptions(options = {}) {
+    const { maxPasses: _ignoredMaxPasses, ...normalizedOptions } =
+      options && typeof options === 'object' ? options : {};
     return {
       adaptiveMode: 'always',
-      ...(options && typeof options === 'object' ? options : {})
+      ...normalizedOptions
     };
   }
 
@@ -190,7 +192,6 @@ export function createUserscriptProcessingRuntime({
       encodeMs,
       totalMs,
       adaptiveMode: options?.adaptiveMode || '',
-      maxPasses: options?.maxPasses ?? null,
       engineStageTimings,
       engineDrawMs: engineStageTimings?.drawMs ?? null,
       engineGetImageDataMs: engineStageTimings?.getImageDataMs ?? null,
@@ -252,7 +253,7 @@ export function createUserscriptProcessingRuntime({
       return processBlobWithBestPath(blob, options);
     },
     async removeWatermarkFromBlob(blob, options = {}) {
-      return (await runtime.processWatermarkBlob(blob, options)).processedBlob;
+      return (await runtime.processWatermarkBlob(blob, normalizeProcessingOptions(options))).processedBlob;
     }
   };
 

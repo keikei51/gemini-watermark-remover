@@ -7,7 +7,7 @@
 - 网站构建产物：`dist/`
 - 油猴脚本产物：`dist/userscript/gemini-watermark-remover.user.js`
 - `package.json`、`src/core/`、`src/sdk/` 对应的 package/sdk 源码与元数据
-- Chrome Web Store 商店页，以及备用安装包：`dist/releases/gemini-watermark-remover-extension-v<version>.zip`
+- Chrome Web Store 商店页，以及备用安装包：`release/gemini-watermark-remover-extension-v<version>.zip`
 
 ## 发布前检查
 
@@ -27,8 +27,8 @@ pnpm package:extension
 - `dist/userscript/gemini-watermark-remover.user.js` 已重新生成
 - `package.json` 中的 package/sdk 入口仍与实际发布源码布局一致
 - 生成后的 userscript 元数据使用当前 `package.json` 版本号
-- `dist/releases/` 下已重新生成 Chrome 插件 zip、sha256 文件和 `latest-extension.json`，用于 GitHub Release 和手动安装备用入口
-- `dist/extension` 下的未打包插件是本地测试版；正式发布 manifest 只写入 `dist/releases/` 里的 zip
+- `release/` 下已重新生成 Chrome 插件 zip、sha256 文件和 `latest-extension.json`，用于 GitHub Release 和手动安装备用入口
+- `dist/extension` 下的未打包插件是本地测试版；正式发布 manifest 只写入 `release/` 里的 zip
 
 ## 版本元数据
 
@@ -53,7 +53,7 @@ pnpm package:extension
 - 提交版本相关改动
 - 创建与版本号一致的 git tag，例如 `v1.0.1`
 - 基于该 tag 创建 GitHub Release，并上传 `dist/userscript/gemini-watermark-remover.user.js`
-- 上传 `dist/releases/gemini-watermark-remover-extension-v<version>.zip`、对应 `.sha256.txt` 和 `latest-extension.json` 到 GitHub Release，作为手动安装备用包
+- 上传 `release/gemini-watermark-remover-extension-v<version>.zip`、对应 `.sha256.txt` 和 `latest-extension.json` 到 GitHub Release，作为手动安装备用包
 - 将 Chrome 插件包提交到 Chrome Web Store，或确认已审核通过的商店页正在提供目标版本
 - 只有本次涉及 package 对外接口时，才同步发布 sdk/package
 
@@ -62,9 +62,9 @@ GitHub Release 命令示例：
 ```bash
 gh release create v<version> \
   dist/userscript/gemini-watermark-remover.user.js \
-  dist/releases/gemini-watermark-remover-extension-v<version>.zip \
-  dist/releases/gemini-watermark-remover-extension-v<version>.zip.sha256.txt \
-  dist/releases/latest-extension.json \
+  release/gemini-watermark-remover-extension-v<version>.zip \
+  release/gemini-watermark-remover-extension-v<version>.zip.sha256.txt \
+  release/latest-extension.json \
   --repo GargantuaX/gemini-watermark-remover \
   --title "v<version>" \
   --notes "<release notes>" \

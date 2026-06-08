@@ -203,7 +203,6 @@ async function buildBenchmarkReport({
         const processed = processWatermarkImageData(imageData, {
             alpha48,
             alpha96,
-            maxPasses: 4,
             getAlphaMap: alphaResolver
         });
         const position = resolveBenchmarkPosition({

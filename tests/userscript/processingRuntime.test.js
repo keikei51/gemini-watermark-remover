@@ -28,8 +28,7 @@ test('createUserscriptProcessingRuntime should allow detached removeWatermarkFro
 
   assert.equal(await processedBlob.text(), 'processed');
   assert.deepEqual(receivedOptions, {
-    adaptiveMode: 'never',
-    maxPasses: 2
+    adaptiveMode: 'never'
   });
 });
 
@@ -137,7 +136,7 @@ test('createUserscriptProcessingRuntime should include selectionDebug in main-th
 
     const result = await runtime.processWatermarkBlob(
       new Blob(['raw'], { type: 'image/jpeg' }),
-      { adaptiveMode: 'always', maxPasses: 1 }
+      { adaptiveMode: 'always' }
     );
 
     assert.equal(result.processedMeta?.selectionDebug, selectionDebug);
