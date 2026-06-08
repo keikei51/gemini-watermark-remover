@@ -21,10 +21,10 @@ test('parsePreviewAlphaCalibrationCliArgs should default to sample pair manifest
 test('parsePreviewAlphaCalibrationCliArgs should parse repeated source-preview pairs and explicit output', () => {
     const parsed = parsePreviewAlphaCalibrationCliArgs([
         '--pair',
-        'src/assets/samples/21-9.webp',
+        'src/assets/samples/21-9.png',
         'src/assets/samples/21-9-preview.png',
         '--pair',
-        'src/assets/samples/9-16.webp',
+        'src/assets/samples/9-16.png',
         'src/assets/samples/9-16-preview.png',
         '--output',
         'tmp/preview-alpha.json'
@@ -32,11 +32,11 @@ test('parsePreviewAlphaCalibrationCliArgs should parse repeated source-preview p
 
     assert.deepEqual(parsed.pairs, [
         {
-            sourcePath: path.resolve('src/assets/samples/21-9.webp'),
+            sourcePath: path.resolve('src/assets/samples/21-9.png'),
             previewPath: path.resolve('src/assets/samples/21-9-preview.png')
         },
         {
-            sourcePath: path.resolve('src/assets/samples/9-16.webp'),
+            sourcePath: path.resolve('src/assets/samples/9-16.png'),
             previewPath: path.resolve('src/assets/samples/9-16-preview.png')
         }
     ]);

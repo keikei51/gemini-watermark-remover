@@ -2,6 +2,24 @@
 
 ## Debug Workflow
 
+### Data-Driven Watermark Investigation
+
+- When user-provided samples show obvious watermarks being skipped or poorly removed, treat the first task as pattern discovery, not threshold tuning.
+- Derive the watermark geometry and rendering rules from the samples before changing removal heuristics:
+  - exact anchor position (`x/y`, right/bottom margins)
+  - watermark size and aspect
+  - subpixel offset / scale drift
+  - alpha map shape and alpha strength
+  - background-dependent compositing behavior
+- Build batch reports and visual artifacts from the sample set:
+  - full image list with dimensions and scores
+  - bottom-right crop sheets
+  - candidate-position overlays when debugging detection
+  - before/after crops for every changed strategy
+- Prefer improving candidate localization and alpha estimation over loosening safety/protection gates.
+- Safety gates are a final fallback. If a visible watermark is skipped, first ask whether the selected position/size/alpha candidate is wrong or incomplete.
+- Do not generalize from a single image when the user supplied a sample set. Cluster samples by size, anchor, background, and residual behavior, then make the smallest algorithm change supported by that cluster.
+
 ## Deployment Note
 
 - The active local/debugging build surface is the generated `dist/` directory.

@@ -84,6 +84,96 @@ test('selectInitialCandidate should not require eager adaptive search when the s
     assert.equal(result.position.y, position.y);
 });
 
+test('selectInitialCandidate should validate strong-alpha standard anchors before skipping', () => {
+    const alpha96 = createSyntheticAlphaMap(96);
+    const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
+    const strongAlpha48 = new Float32Array(alpha48.length);
+    for (let index = 0; index < alpha48.length; index++) {
+        strongAlpha48[index] = Math.min(0.95, alpha48[index] * 1.25);
+    }
+    const imageData = createPatternImageData(320, 320);
+    const config = {
+        logoSize: 48,
+        marginRight: 32,
+        marginBottom: 32
+    };
+    const position = {
+        x: imageData.width - config.marginRight - config.logoSize,
+        y: imageData.height - config.marginBottom - config.logoSize,
+        width: config.logoSize,
+        height: config.logoSize
+    };
+
+    applySyntheticWatermark(imageData, strongAlpha48, position, 1);
+
+    const result = selectInitialCandidate({
+        originalImageData: imageData,
+        config,
+        position,
+        alpha48,
+        alpha96,
+        getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size),
+        allowAdaptiveSearch: false,
+        allowAutomaticSearch: false,
+        alphaGainCandidates: [0.6, 1, 1.15, 1.3],
+        alphaPriorityGains: [0.6, 1, 1.15, 1.3]
+    });
+
+    assert.ok(result.selectedTrial, 'expected strong-alpha standard candidate to be selected');
+    assert.equal(result.alphaGain, 1.15);
+    assert.equal(result.source, 'standard+gain');
+    assert.deepEqual(result.position, position);
+});
+
+test('selectInitialCandidate should recover fixed-core local geometry drift for strong standard evidence', () => {
+    const alpha96 = createSyntheticAlphaMap(96);
+    const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
+    const alpha46 = interpolateAlphaMap(alpha96, 96, 46);
+    const strongAlpha46 = new Float32Array(alpha46.length);
+    for (let index = 0; index < alpha46.length; index++) {
+        strongAlpha46[index] = Math.min(0.95, alpha46[index] * 1.2);
+    }
+    const imageData = createPatternImageData(720, 1456);
+    const config = {
+        logoSize: 48,
+        marginRight: 32,
+        marginBottom: 32
+    };
+    const position = {
+        x: imageData.width - config.marginRight - config.logoSize,
+        y: imageData.height - config.marginBottom - config.logoSize,
+        width: config.logoSize,
+        height: config.logoSize
+    };
+    const truePosition = {
+        x: imageData.width - 35 - 46,
+        y: imageData.height - 35 - 46,
+        width: 46,
+        height: 46
+    };
+
+    applySyntheticWatermark(imageData, strongAlpha46, truePosition, 1);
+
+    const result = selectInitialCandidate({
+        originalImageData: imageData,
+        config,
+        position,
+        alpha48,
+        alpha96,
+        getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size),
+        allowAdaptiveSearch: false,
+        allowAutomaticSearch: false,
+        alphaGainCandidates: [0.6, 1, 1.15, 1.3],
+        alphaPriorityGains: [0.6, 1, 1.15, 1.3]
+    });
+
+    assert.ok(result.selectedTrial, 'expected local fixed-core candidate to be selected');
+    assert.ok(Math.abs(result.position.x - truePosition.x) <= 1, `x=${result.position.x}`);
+    assert.ok(Math.abs(result.position.y - truePosition.y) <= 1, `y=${result.position.y}`);
+    assert.ok(Math.abs(result.position.width - truePosition.width) <= 1, `width=${result.position.width}`);
+    assert.ok(String(result.source).includes('fixed-local'), `source=${result.source}`);
+});
+
 test('selectInitialCandidate should not use automatic preview-anchor search outside fixed combinations', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
@@ -164,6 +254,44 @@ test('evaluateRestorationCandidate should add texture penalty when restoration b
     assert.ok(candidate.texturePenalty > 0, `texturePenalty=${candidate.texturePenalty}`);
 });
 
+test('evaluateRestorationCandidate should reject standard candidates with no original watermark evidence', () => {
+    const alpha96 = createSyntheticAlphaMap(96);
+    const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
+    const data = new Uint8ClampedArray(320 * 320 * 4);
+    for (let index = 0; index < 320 * 320; index++) {
+        const offset = index * 4;
+        data[offset] = 220;
+        data[offset + 1] = 220;
+        data[offset + 2] = 220;
+        data[offset + 3] = 255;
+    }
+    const imageData = { width: 320, height: 320, data };
+    const position = {
+        x: 240,
+        y: 240,
+        width: 48,
+        height: 48
+    };
+
+    const candidate = evaluateRestorationCandidate({
+        originalImageData: imageData,
+        alphaMap: alpha48,
+        position,
+        source: 'standard',
+        config: {
+            logoSize: 48,
+            marginRight: 32,
+            marginBottom: 32
+        },
+        baselineNearBlackRatio: 0,
+        alphaGain: 1
+    });
+
+    assert.equal(candidate.accepted, false);
+    assert.ok(candidate.originalSpatialScore < 0.05, `spatial=${candidate.originalSpatialScore}`);
+    assert.ok(candidate.originalGradientScore < 0.12, `gradient=${candidate.originalGradientScore}`);
+});
+
 test('evaluateRestorationCandidate should support scoring without materializing a full candidate image', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);
@@ -213,6 +341,12 @@ test('evaluateRestorationCandidate should support scoring without materializing 
     assert.equal(scoreOnlyCandidate.processedSpatialScore, fullCandidate.processedSpatialScore);
     assert.equal(scoreOnlyCandidate.processedGradientScore, fullCandidate.processedGradientScore);
     assert.equal(scoreOnlyCandidate.validationCost, fullCandidate.validationCost);
+    assert.equal(scoreOnlyCandidate.originalEvidence.tier, 'strong');
+    assert.equal(scoreOnlyCandidate.residual.cleared, true);
+    assert.equal(scoreOnlyCandidate.damage.safe, true);
+    assert.equal(scoreOnlyCandidate.sourcePriority, 0);
+    assert.ok(Array.isArray(scoreOnlyCandidate.rankingKey));
+    assert.equal(scoreOnlyCandidate.earlyAccept, true);
 });
 
 test('pickBetterCandidate should keep the default anchor when a local shift loses strong original watermark evidence', () => {
@@ -350,6 +484,72 @@ test('pickBetterCandidate should preserve a clean default anchor against weaker 
     const selected = pickBetterCandidate(defaultAnchorCandidate, weakWarpCandidate, 0.002);
 
     assert.equal(selected, defaultAnchorCandidate);
+});
+
+test('pickBetterCandidate should use rankingKey for same-anchor local alpha choices', () => {
+    const position = { x: 240, y: 240, width: 48, height: 48 };
+    const config = { logoSize: 48, marginRight: 32, marginBottom: 32 };
+    const riskyLowResidualCandidate = {
+        accepted: true,
+        source: 'standard',
+        provenance: null,
+        config,
+        position,
+        validationCost: 0.01,
+        improvement: 0.6,
+        originalSpatialScore: 0.7,
+        originalGradientScore: 0.4,
+        rankingKey: [0, -3, 1, 0.01, 0, 0.8]
+    };
+    const safeCandidate = {
+        accepted: true,
+        source: 'standard+gain',
+        provenance: null,
+        config,
+        position,
+        validationCost: 0.08,
+        improvement: 0.5,
+        originalSpatialScore: 0.7,
+        originalGradientScore: 0.4,
+        rankingKey: [0, -3, 0, 0.08, 1, 0.02]
+    };
+
+    const selected = pickBetterCandidate(riskyLowResidualCandidate, safeCandidate, 0.002);
+
+    assert.equal(selected, safeCandidate);
+});
+
+test('pickBetterCandidate should not apply same-anchor rankingKey migration to preview-anchor fallbacks', () => {
+    const position = { x: 720, y: 480, width: 34, height: 34 };
+    const config = { logoSize: 34, marginRight: 24, marginBottom: 24 };
+    const cleanPreviewCandidate = {
+        accepted: true,
+        source: 'standard+preview-anchor',
+        provenance: { previewAnchor: true },
+        config,
+        position,
+        validationCost: 0.02,
+        improvement: 0.4,
+        originalSpatialScore: 0.5,
+        originalGradientScore: 0.3,
+        rankingKey: [8, -2, 1, 0.02, 0, 0.4]
+    };
+    const rankingPreferredPreviewCandidate = {
+        accepted: true,
+        source: 'standard+preview-anchor+gain',
+        provenance: { previewAnchor: true },
+        config,
+        position,
+        validationCost: 0.08,
+        improvement: 0.35,
+        originalSpatialScore: 0.5,
+        originalGradientScore: 0.3,
+        rankingKey: [8, -2, 0, 0.08, 1, 0.02]
+    };
+
+    const selected = pickBetterCandidate(cleanPreviewCandidate, rankingPreferredPreviewCandidate, 0.002);
+
+    assert.equal(selected, cleanPreviewCandidate);
 });
 
 test('assessReferenceTextureAlignment should mark a candidate unsafe when it is both darker and flatter than the local reference', () => {
@@ -620,9 +820,16 @@ test('selectInitialCandidate should keep searching nearby on tall portrait image
 });
 
 test('selectInitialCandidate should keep the canonical anchor for debug2-source when drifted candidates have weaker original evidence', async () => {
+    const samplePath = path.resolve('src/assets/samples/debug2-source.png');
+    try {
+        await decodeImageDataInNode(samplePath);
+    } catch {
+        return;
+    }
+
     const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
     const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
-    const originalImageData = await decodeImageDataInNode(path.resolve('src/assets/samples/debug2-source.png'));
+    const originalImageData = await decodeImageDataInNode(samplePath);
     const config = {
         logoSize: 48,
         marginRight: 32,

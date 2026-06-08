@@ -163,7 +163,22 @@ function getEntryLegacyConfigs(entry) {
 }
 
 function buildConfigKey(config) {
-    return `${config.logoSize}:${config.marginRight}:${config.marginBottom}`;
+    return `${config.logoSize}:${config.marginRight}:${config.marginBottom}:${config.alphaVariant ?? 'default'}`;
+}
+
+function createCatalogEntry(config, metadata = {}) {
+    return {
+        config,
+        metadata: {
+            family: metadata.family ?? 'catalog',
+            sourcePriority: metadata.sourcePriority ?? 9,
+            evidenceGate: metadata.evidenceGate ?? 'required',
+            modelFamily: metadata.modelFamily ?? null,
+            resolutionTier: metadata.resolutionTier ?? null,
+            aspectRatio: metadata.aspectRatio ?? null,
+            source: metadata.source ?? null
+        }
+    };
 }
 
 function createNewMarginVariantConfig(baseConfig, width, height) {
@@ -179,6 +194,12 @@ function createNewMarginVariantConfig(baseConfig, width, height) {
     const x = width - config.marginRight - config.logoSize;
     const y = height - config.marginBottom - config.logoSize;
     return x >= 0 && y >= 0 ? config : null;
+}
+
+function createUnknownSizeNewMarginVariantConfig(baseConfig, width, height) {
+    if (!baseConfig || baseConfig.logoSize !== 96) return null;
+    if (Math.min(width, height) < 1024) return null;
+    return createNewMarginVariantConfig(baseConfig, width, height);
 }
 
 function createCurrentLargeMarginVariantConfig(baseConfig, width, height, { allowAnyBase = false } = {}) {
@@ -218,7 +239,26 @@ function resolveKnownFixedGeminiWatermarkConfigs(width, height) {
     return Array.isArray(configs) ? configs.map((config) => ({ ...config })) : [];
 }
 
+function resolveKnownFixedGeminiWatermarkConfigEntries(width, height) {
+    return resolveKnownFixedGeminiWatermarkConfigs(width, height)
+        .map((config) => createCatalogEntry(config, {
+            family: 'fixed-size-variant',
+            sourcePriority: 5,
+            evidenceGate: 'required',
+            source: 'known-fixed-size'
+        }));
+}
+
 export function resolveOfficialGeminiSearchConfigs(
+    width,
+    height,
+    options = {}
+) {
+    return resolveOfficialGeminiSearchConfigEntries(width, height, options)
+        .map((entry) => entry.config);
+}
+
+export function resolveOfficialGeminiSearchConfigEntries(
     width,
     height,
     {
@@ -238,8 +278,18 @@ export function resolveOfficialGeminiSearchConfigs(
         normalizedHeight
     );
     if (exactOfficialConfig) {
-        const configs = [{ ...exactOfficialConfig }];
         const match = matchOfficialGeminiImageSize(normalizedWidth, normalizedHeight);
+        const entries = [
+            createCatalogEntry({ ...exactOfficialConfig }, {
+                family: 'exact-official-current',
+                sourcePriority: 0,
+                evidenceGate: 'standard',
+                modelFamily: match?.modelFamily ?? null,
+                resolutionTier: match?.resolutionTier ?? null,
+                aspectRatio: match?.aspectRatio ?? null,
+                source: 'official-size'
+            })
+        ];
         if (match?.modelFamily === 'gemini-3.x-image' && match.resolutionTier === '1k') {
             const currentLargeMarginVariant = createCurrentLargeMarginVariantConfig(
                 exactOfficialConfig,
@@ -247,11 +297,27 @@ export function resolveOfficialGeminiSearchConfigs(
                 normalizedHeight
             );
             if (currentLargeMarginVariant) {
-                configs.push(currentLargeMarginVariant);
+                entries.push(createCatalogEntry(currentLargeMarginVariant, {
+                    family: 'known-current-variant',
+                    sourcePriority: 1,
+                    evidenceGate: 'required',
+                    modelFamily: match.modelFamily,
+                    resolutionTier: match.resolutionTier,
+                    aspectRatio: match.aspectRatio,
+                    source: '202606-large-margin'
+                }));
             }
         }
         for (const legacyConfig of getEntryLegacyConfigs(match)) {
-            configs.push({ ...legacyConfig });
+            entries.push(createCatalogEntry({ ...legacyConfig }, {
+                family: 'exact-official-legacy',
+                sourcePriority: 2,
+                evidenceGate: 'required',
+                modelFamily: match?.modelFamily ?? null,
+                resolutionTier: match?.resolutionTier ?? null,
+                aspectRatio: match?.aspectRatio ?? null,
+                source: 'legacy-96px'
+            }));
         }
 
         if (!(match?.modelFamily === 'gemini-3.x-image' && match.resolutionTier === '1k')) {
@@ -261,10 +327,18 @@ export function resolveOfficialGeminiSearchConfigs(
                 normalizedHeight
             );
             if (newMarginVariant) {
-                configs.push(newMarginVariant);
+                entries.push(createCatalogEntry(newMarginVariant, {
+                    family: 'confirmed-exception',
+                    sourcePriority: 3,
+                    evidenceGate: 'required',
+                    modelFamily: match?.modelFamily ?? null,
+                    resolutionTier: match?.resolutionTier ?? null,
+                    aspectRatio: match?.aspectRatio ?? null,
+                    source: '20260520-2816x1536'
+                }));
             }
         }
-        return configs;
+        return entries;
     }
 
     // Near-official exports are often uniformly scaled from an official size.
@@ -298,6 +372,15 @@ export function resolveOfficialGeminiSearchConfigs(
 
             return {
                 config,
+                metadata: {
+                    family: 'near-official-projected',
+                    sourcePriority: 4,
+                    evidenceGate: 'required',
+                    modelFamily: entry.modelFamily,
+                    resolutionTier: entry.resolutionTier,
+                    aspectRatio: entry.aspectRatio,
+                    source: `${entry.width}x${entry.height}`
+                },
                 score:
                     relativeAspectRatioDelta * 100 +
                     scaleMismatchRatio * 20 +
@@ -313,7 +396,7 @@ export function resolveOfficialGeminiSearchConfigs(
         const key = `${candidate.config.logoSize}:${candidate.config.marginRight}:${candidate.config.marginBottom}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        deduped.push(candidate.config);
+        deduped.push(createCatalogEntry(candidate.config, candidate.metadata));
         if (deduped.length >= limit) break;
     }
 
@@ -321,33 +404,64 @@ export function resolveOfficialGeminiSearchConfigs(
 }
 
 export function resolveGeminiWatermarkSearchConfigs(width, height, defaultConfig) {
-    const configs = [];
+    return resolveGeminiWatermarkSearchCatalogEntries(width, height, defaultConfig)
+        .map((entry) => entry.config);
+}
+
+export function resolveGeminiWatermarkSearchCatalogEntries(width, height, defaultConfig) {
+    const entries = [];
     if (defaultConfig) {
-        configs.push(defaultConfig);
+        entries.push(createCatalogEntry(defaultConfig, {
+            family: 'default-standard',
+            sourcePriority: 0,
+            evidenceGate: 'standard',
+            source: 'default-config'
+        }));
     }
-    configs.push(...resolveKnownFixedGeminiWatermarkConfigs(width, height));
-    configs.push(...resolveOfficialGeminiSearchConfigs(width, height));
+    entries.push(...resolveKnownFixedGeminiWatermarkConfigEntries(width, height));
+    entries.push(...resolveOfficialGeminiSearchConfigEntries(width, height));
     const currentLargeMarginVariant = createCurrentLargeMarginVariantConfig(defaultConfig, width, height);
     if (currentLargeMarginVariant) {
-        configs.push(currentLargeMarginVariant);
+        entries.push(createCatalogEntry(currentLargeMarginVariant, {
+            family: 'known-current-variant',
+            sourcePriority: 1,
+            evidenceGate: 'required',
+            source: 'default-large-margin'
+        }));
     }
     if (!isOfficialOrKnownGeminiDimensions(width, height)) {
+        const unknownSizeNewMarginVariant = createUnknownSizeNewMarginVariantConfig(defaultConfig, width, height);
+        if (unknownSizeNewMarginVariant) {
+            entries.push(createCatalogEntry(unknownSizeNewMarginVariant, {
+                family: 'known-new-margin-variant',
+                sourcePriority: 2,
+                evidenceGate: 'required',
+                source: 'unknown-size-new-margin'
+            }));
+        }
+
         const unknownSizeCurrentLargeMarginVariant = createCurrentLargeMarginVariantConfig(defaultConfig, width, height, {
             allowAnyBase: true
         });
         if (unknownSizeCurrentLargeMarginVariant) {
-            configs.push(unknownSizeCurrentLargeMarginVariant);
+            entries.push(createCatalogEntry(unknownSizeCurrentLargeMarginVariant, {
+                family: 'known-current-variant',
+                sourcePriority: 1,
+                evidenceGate: 'required',
+                source: 'unknown-size-large-margin'
+            }));
         }
     }
 
     const deduped = [];
     const seen = new Set();
-    for (const config of configs) {
+    for (const entry of entries) {
+        const config = entry?.config;
         if (!config) continue;
         const key = buildConfigKey(config);
         if (seen.has(key)) continue;
         seen.add(key);
-        deduped.push(config);
+        deduped.push(entry);
     }
 
     return deduped;

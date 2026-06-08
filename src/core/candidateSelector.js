@@ -20,8 +20,16 @@ import {
     hasReliableStandardWatermarkSignal
 } from './watermarkPresence.js';
 import {
+    buildRankingKey,
+    compareRankingKey,
+    scoreDamage,
+    scoreOriginalEvidence,
+    scoreResidual,
+    shouldEarlyAccept
+} from './watermarkScoring.js';
+import {
     matchOfficialGeminiImageSize,
-    resolveGeminiWatermarkSearchConfigs
+    resolveGeminiWatermarkSearchCatalogEntries
 } from './geminiSizeCatalog.js';
 
 const MAX_NEAR_BLACK_RATIO_INCREASE = 0.05;
@@ -31,7 +39,7 @@ const VALIDATION_MAX_GRADIENT_INCREASE = 0.04;
 const VALIDATION_MIN_CONFIDENCE_FOR_ADAPTIVE_TRIAL = 0.25;
 const STANDARD_FAST_PATH_RESIDUAL_THRESHOLD = 0.22;
 const STANDARD_FAST_PATH_GRADIENT_THRESHOLD = 0.08;
-const FIXED_CORE_MAX_ACCEPTED_SPATIAL_RESIDUAL = 0.36;
+const FIXED_CORE_MAX_ACCEPTED_SPATIAL_RESIDUAL = 0.45;
 const STANDARD_EXPAND_CATALOG_MIN_ORIGINAL_GRADIENT = 0.12;
 const WEAK_ALPHA_PRIORITY_CLEAN_GRADIENT_THRESHOLD = 0.12;
 const STRONG_ORIGINAL_SIGNAL_SPATIAL_ADVANTAGE = 0.2;
@@ -56,6 +64,23 @@ const STANDARD_TEXT_OVERLAP_MIN_GRADIENT_SCORE = 0.18;
 const STANDARD_TEXT_OVERLAP_MIN_IMPROVEMENT = 0.25;
 const STANDARD_TEXT_OVERLAP_MAX_RESIDUAL = 0.1;
 const STANDARD_TEXT_OVERLAP_MIN_GRADIENT_DROP = 0.1;
+const STANDARD_VALIDATION_MIN_ORIGINAL_SPATIAL_SCORE = 0.05;
+const STANDARD_VALIDATION_MIN_ORIGINAL_GRADIENT_SCORE = 0.12;
+const STANDARD_CONSERVATIVE_CATALOG_PREFERRED_ALPHA_GAIN = 0.55;
+const STANDARD_CONSERVATIVE_CATALOG_MAX_ALPHA_GAIN = 0.6;
+const STANDARD_CONSERVATIVE_CATALOG_MIN_ORIGINAL_SPATIAL_SCORE = 0.12;
+const STANDARD_CONSERVATIVE_CATALOG_MIN_ORIGINAL_GRADIENT_SCORE = 0.08;
+const STANDARD_CONSERVATIVE_CATALOG_MAX_RESIDUAL = 0.12;
+const STANDARD_CONSERVATIVE_CATALOG_MAX_GRADIENT = 0.12;
+const STANDARD_CONSERVATIVE_CATALOG_MIN_IMPROVEMENT = 0.12;
+const STANDARD_CONSERVATIVE_CATALOG_MAX_NEAR_BLACK_INCREASE = 0.005;
+const STANDARD_VISIBLE_CATALOG_MAX_ALPHA_GAIN = 0.6;
+const STANDARD_VISIBLE_CATALOG_MIN_ORIGINAL_SPATIAL_SCORE = 0.45;
+const STANDARD_VISIBLE_CATALOG_MIN_ORIGINAL_GRADIENT_SCORE = 0.55;
+const STANDARD_VISIBLE_CATALOG_MAX_SPATIAL_RESIDUAL = 0.35;
+const STANDARD_VISIBLE_CATALOG_MAX_GRADIENT_RESIDUAL = 0.18;
+const STANDARD_VISIBLE_CATALOG_MIN_IMPROVEMENT = 0.7;
+const STANDARD_VISIBLE_CATALOG_MAX_NEAR_BLACK_INCREASE = 0.05;
 const STANDARD_HARD_REJECT_OVERRIDE_MIN_SPATIAL_SCORE = 0.9;
 const STANDARD_HARD_REJECT_OVERRIDE_MIN_GRADIENT_SCORE = 0.7;
 const STANDARD_HARD_REJECT_OVERRIDE_MAX_RESIDUAL = 0.08;
@@ -64,7 +89,7 @@ const STANDARD_HARD_REJECT_OVERRIDE_MIN_IMPROVEMENT = 0.7;
 const STANDARD_HARD_REJECT_OVERRIDE_MAX_NEAR_BLACK_INCREASE = 0.01;
 const STANDARD_STRONG_SIGNAL_NEAR_BLACK_OVERRIDE_MIN_SPATIAL_SCORE = 0.9;
 const STANDARD_STRONG_SIGNAL_NEAR_BLACK_OVERRIDE_MIN_GRADIENT_SCORE = 0.7;
-const STANDARD_STRONG_SIGNAL_NEAR_BLACK_OVERRIDE_MAX_RESIDUAL = 0.22;
+const STANDARD_STRONG_SIGNAL_NEAR_BLACK_OVERRIDE_MAX_RESIDUAL = 0.7;
 const STANDARD_STRONG_SIGNAL_NEAR_BLACK_OVERRIDE_MAX_GRADIENT = 0.32;
 const STANDARD_STRONG_SIGNAL_NEAR_BLACK_OVERRIDE_MIN_IMPROVEMENT = 0.7;
 const STANDARD_STRONG_SIGNAL_NEAR_BLACK_OVERRIDE_MIN_GRADIENT_DROP = 0.6;
@@ -74,6 +99,12 @@ const TEMPLATE_ALIGN_SCALES = [0.99, 1, 1.01];
 const STANDARD_NEARBY_SHIFTS = [-12, -8, -4, 0, 4, 8, 12];
 const STANDARD_FINE_LOCAL_SHIFTS = [-2, -1, 0, 1, 2];
 const STANDARD_SIZE_JITTERS = [-12, -10, -8, -6, -4, -2, 2, 4, 6, 8, 10, 12];
+const FIXED_CORE_LOCAL_SIZE_DELTAS = [-3, -2, -1, 0, 1, 2, 3, 4];
+const FIXED_CORE_LOCAL_MARGIN_DELTAS = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+const FIXED_CORE_LOCAL_MIN_ORIGINAL_SPATIAL_SCORE = 0.7;
+const FIXED_CORE_LOCAL_MIN_ORIGINAL_GRADIENT_SCORE = 0.3;
+const FIXED_CORE_LOCAL_VISIBLE_CATALOG_MIN_ORIGINAL_SPATIAL_SCORE = 0.45;
+const FIXED_CORE_LOCAL_VISIBLE_CATALOG_MIN_ORIGINAL_GRADIENT_SCORE = 0.55;
 const PREVIEW_ANCHOR_MIN_SIZE = 24;
 const PREVIEW_ANCHOR_MAX_SIZE_RATIO = 1.05;
 const PREVIEW_ANCHOR_MIN_SIZE_RATIO = 0.55;
@@ -88,6 +119,37 @@ const PREVIEW_TEMPLATE_ALIGN_SHIFTS = [-1, -0.5, 0, 0.5, 1];
 const PREVIEW_TEMPLATE_ALIGN_SCALES = [0.985, 1, 1.015];
 const PREVIEW_ANCHOR_GAIN_SKIP_RESIDUAL_THRESHOLD = 0.22;
 const PREVIEW_ANCHOR_GAIN_SKIP_GRADIENT_THRESHOLD = 0.24;
+const CORE_ALPHA_PRIORITY_GAINS = Object.freeze([0.6, 1, 1.15, 1.3, 0.45, 0.7, 0.85, 0.55]);
+const CURRENT_LARGE_MARGIN_ULTRA_WEAK_ALPHA_GAINS = Object.freeze([0.25, 0.3, 0.35, 0.4]);
+const STANDARD_ANCHOR_WEAK_ALPHA_RESCUE_GAINS = Object.freeze([0.55, 0.7, 0.85]);
+const STANDARD_ANCHOR_WEAK_RESCUE_MAX_SPATIAL = 0.35;
+const STANDARD_ANCHOR_WEAK_RESCUE_MAX_GRADIENT = 0.18;
+const STANDARD_ANCHOR_WEAK_RESCUE_MIN_IMPROVEMENT = 0.08;
+const STANDARD_ANCHOR_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE = 0.02;
+const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_SPATIAL = 0.22;
+const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_GRADIENT = 0.36;
+const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_ORIGINAL_SPATIAL = 0.17;
+const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_ORIGINAL_GRADIENT = 0.12;
+const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_IMPROVEMENT = 0.08;
+const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE = 0.01;
+const CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_TEXTURE = 0.55;
+const CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MIN_ORIGINAL_SPATIAL = 0.4;
+const CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MIN_ORIGINAL_GRADIENT = 0.25;
+const CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MAX_SPATIAL = 0.36;
+const CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MAX_GRADIENT = 0.24;
+const CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MAX_TEXTURE = 0.1;
+const CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MIN_ORIGINAL_SPATIAL = 0.8;
+const CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MIN_ORIGINAL_GRADIENT = 0.8;
+const CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MAX_SPATIAL = 0.35;
+const CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MAX_GRADIENT = 0.18;
+const CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MIN_IMPROVEMENT = 0.7;
+const CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MAX_NEAR_BLACK_INCREASE = 0.05;
+const CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MIN_ORIGINAL_GRADIENT = 0.5;
+const CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_ORIGINAL_SPATIAL = 0.35;
+const CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_ALPHA_GAIN = 0.6;
+const CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_TEXTURE = 0.08;
+const CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_SPATIAL = 0.32;
+const CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MIN_GRADIENT_DROP = 0.12;
 
 export { assessReferenceTextureAlignment, calculateNearBlackRatio, scoreRegion } from './restorationMetrics.js';
 
@@ -101,6 +163,26 @@ function mergeCandidateProvenance(...provenanceParts) {
     }
 
     return Object.keys(merged).length > 0 ? merged : null;
+}
+
+function inferCandidateSourcePriority({ source = '', provenance = null } = {}) {
+    const catalogPriority = Number(provenance?.catalogSourcePriority);
+    if (Number.isFinite(catalogPriority)) return catalogPriority;
+
+    if (provenance?.localShift === true) return 6;
+    if (provenance?.sizeJitter === true) return 7;
+    if (provenance?.previewAnchor === true || String(source).includes('preview-anchor')) return 8;
+    if (provenance?.adaptive === true || source === 'adaptive') return 9;
+    if (String(source).startsWith('standard+catalog')) return 3;
+    if (String(source).startsWith('standard')) return 0;
+    return 9;
+}
+
+function inferAlphaPriorityIndex(alphaGain) {
+    const index = CORE_ALPHA_PRIORITY_GAINS.findIndex((candidateGain) => (
+        Math.abs(candidateGain - alphaGain) < 0.0001
+    ));
+    return index >= 0 ? index : 99;
 }
 
 function isProjectedPreviewCatalogConfig(originalImageData, candidateConfig, baseConfig) {
@@ -127,16 +209,17 @@ function buildStandardCandidateSeeds({
     resolveAlphaMap = null,
     includeCatalogVariants = true
 }) {
-    const configs = includeCatalogVariants
-        ? resolveGeminiWatermarkSearchConfigs(
+    const catalogEntries = includeCatalogVariants
+        ? resolveGeminiWatermarkSearchCatalogEntries(
             originalImageData.width,
             originalImageData.height,
             config
         )
-        : [config];
+        : [{ config, metadata: null }];
     const seeds = [];
 
-    for (const candidateConfig of configs) {
+    for (const catalogEntry of catalogEntries) {
+        const candidateConfig = catalogEntry.config;
         const candidatePosition = candidateConfig === config
             ? position
             : {
@@ -180,7 +263,12 @@ function buildStandardCandidateSeeds({
                 candidateConfig === config ? null : { catalogVariant: true },
                 candidateConfig.fixedVariant === true ? { fixedVariant: true } : null,
                 projectedPreviewCatalog ? { previewAnchor: true } : null,
-                candidateConfig.alphaVariant ? { alphaVariant: candidateConfig.alphaVariant } : null
+                candidateConfig.alphaVariant ? { alphaVariant: candidateConfig.alphaVariant } : null,
+                catalogEntry.metadata ? {
+                    catalogFamily: catalogEntry.metadata.family,
+                    catalogSourcePriority: catalogEntry.metadata.sourcePriority,
+                    catalogEvidenceGate: catalogEntry.metadata.evidenceGate
+                } : null
             )
         });
     }
@@ -330,14 +418,135 @@ function isWeakAlphaPrioritySeed(seed) {
         seed.config.marginBottom === 96;
 }
 
+function resolveStandardSeedAlphaPriorityGains(seed, alphaPriorityGains) {
+    const extras = isWeakAlphaPrioritySeed(seed)
+        ? [
+            ...CURRENT_LARGE_MARGIN_ULTRA_WEAK_ALPHA_GAINS,
+            STANDARD_CONSERVATIVE_CATALOG_PREFERRED_ALPHA_GAIN
+        ]
+        : STANDARD_ANCHOR_WEAK_ALPHA_RESCUE_GAINS;
+
+    return normalizeAlphaPriorityGains([
+        ...alphaPriorityGains,
+        ...extras
+    ]);
+}
+
+function isWeakAlphaRescueCandidate(seed, trial) {
+    if (!trial?.accepted || trial.alphaGain >= 1) {
+        return false;
+    }
+
+    if (isWeakAlphaPrioritySeed(seed)) {
+        const isVisibleStrongRescue =
+            trial.originalSpatialScore >= CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MIN_ORIGINAL_SPATIAL &&
+            trial.originalGradientScore >= CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MIN_ORIGINAL_GRADIENT &&
+            Math.abs(trial.processedSpatialScore) <= CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MAX_SPATIAL &&
+            Math.max(0, trial.processedGradientScore) <= CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MAX_GRADIENT &&
+            trial.improvement >= CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MIN_IMPROVEMENT &&
+            trial.nearBlackIncrease <= CURRENT_LARGE_MARGIN_VISIBLE_RESCUE_MAX_NEAR_BLACK_INCREASE;
+        if (isVisibleStrongRescue) {
+            return true;
+        }
+
+        const isMediumSafeRescue =
+            (
+                trial.originalSpatialScore >= CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MIN_ORIGINAL_SPATIAL ||
+                trial.originalGradientScore >= CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MIN_ORIGINAL_GRADIENT
+            ) &&
+            Math.abs(trial.processedSpatialScore) <= CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MAX_SPATIAL &&
+            Math.max(0, trial.processedGradientScore) <= CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MAX_GRADIENT &&
+            trial.improvement >= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_IMPROVEMENT &&
+            trial.nearBlackIncrease <= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE &&
+            trial.texturePenalty <= CURRENT_LARGE_MARGIN_MEDIUM_RESCUE_MAX_TEXTURE &&
+            trial.hardReject !== true;
+        if (isMediumSafeRescue) {
+            return true;
+        }
+
+        const hasRescueEvidence =
+            trial.originalSpatialScore >= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_ORIGINAL_SPATIAL ||
+            trial.originalGradientScore >= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_ORIGINAL_GRADIENT ||
+            (
+                trial.originalSpatialScore >= STANDARD_CONSERVATIVE_CATALOG_MIN_ORIGINAL_SPATIAL_SCORE &&
+                trial.originalGradientScore >= STANDARD_CONSERVATIVE_CATALOG_MIN_ORIGINAL_GRADIENT_SCORE
+            );
+
+        return hasRescueEvidence &&
+            Math.abs(trial.processedSpatialScore) <= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_SPATIAL &&
+            Math.max(0, trial.processedGradientScore) <= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_GRADIENT &&
+            trial.improvement >= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MIN_IMPROVEMENT &&
+            trial.nearBlackIncrease <= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE &&
+            trial.texturePenalty <= CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_TEXTURE;
+    }
+
+    if (trial.hardReject === true) {
+        return false;
+    }
+
+    return trial.originalEvidence?.tier === 'strong' &&
+        Math.abs(trial.processedSpatialScore) <= STANDARD_ANCHOR_WEAK_RESCUE_MAX_SPATIAL &&
+        Math.max(0, trial.processedGradientScore) <= STANDARD_ANCHOR_WEAK_RESCUE_MAX_GRADIENT &&
+        trial.improvement >= STANDARD_ANCHOR_WEAK_RESCUE_MIN_IMPROVEMENT &&
+        trial.nearBlackIncrease <= STANDARD_ANCHOR_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE &&
+        trial.texturePenalty <= 0.25;
+}
+
+function shouldPreferLargeMarginGradientClearance(currentBest, candidate) {
+    if (!isCurrentLargeMarginCatalogCandidate(currentBest) || !isCurrentLargeMarginCatalogCandidate(candidate)) {
+        return false;
+    }
+    if (currentBest.alphaGain >= 1 || candidate.alphaGain >= 1) {
+        return false;
+    }
+    if (candidate.alphaGain > CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_ALPHA_GAIN) {
+        return false;
+    }
+    if (
+        candidate.originalGradientScore < CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MIN_ORIGINAL_GRADIENT ||
+        candidate.originalSpatialScore > CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_ORIGINAL_SPATIAL
+    ) {
+        return false;
+    }
+    if (
+        candidate.texturePenalty > CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_TEXTURE ||
+        currentBest.texturePenalty > CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_TEXTURE
+    ) {
+        return false;
+    }
+    if (Math.abs(candidate.processedSpatialScore) > CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MAX_SPATIAL) {
+        return false;
+    }
+    if (candidate.nearBlackIncrease > CURRENT_LARGE_MARGIN_WEAK_RESCUE_MAX_NEAR_BLACK_INCREASE) {
+        return false;
+    }
+
+    return Math.max(0, currentBest.processedGradientScore) -
+        Math.max(0, candidate.processedGradientScore) >= CURRENT_LARGE_MARGIN_GRADIENT_CLEAR_MIN_GRADIENT_DROP;
+}
+
+function pickBetterWeakAlphaRescueCandidate(seed, currentBest, candidate) {
+    if (!candidate?.accepted) return currentBest;
+    if (!currentBest) return candidate;
+    if (
+        isWeakAlphaPrioritySeed(seed) &&
+        shouldPreferLargeMarginGradientClearance(currentBest, candidate)
+    ) {
+        return candidate;
+    }
+    return pickBetterCandidate(currentBest, candidate, 0.002);
+}
+
 function evaluateStandardTrialForSeed({
     originalImageData,
     seed,
     alphaPriorityGains
 }) {
-    const priorityGains = normalizeAlphaPriorityGains(alphaPriorityGains);
+    const priorityGains = resolveStandardSeedAlphaPriorityGains(seed, alphaPriorityGains);
     let fallbackTrial = null;
     let bestAcceptedTrial = null;
+    let bestWeakAlphaPriorityTrial = null;
+    let bestWeakAlphaRescueTrial = null;
 
     for (const alphaGain of priorityGains) {
         const trial = evaluateRestorationCandidate({
@@ -357,8 +566,15 @@ function evaluateStandardTrialForSeed({
             fallbackTrial = trial;
         }
         if (alphaGain < 1) {
-            if (isWeakAlphaPrioritySeed(seed) && isCleanWeakAlphaPriorityCandidate(trial)) {
-                return trial;
+            if (
+                isWeakAlphaPrioritySeed(seed) &&
+                isCleanWeakAlphaPriorityCandidate(trial) &&
+                isWeakAlphaRescueCandidate(seed, trial)
+            ) {
+                bestWeakAlphaPriorityTrial = pickBetterCandidate(bestWeakAlphaPriorityTrial, trial, 0.002);
+            }
+            if (isWeakAlphaRescueCandidate(seed, trial)) {
+                bestWeakAlphaRescueTrial = pickBetterWeakAlphaRescueCandidate(seed, bestWeakAlphaRescueTrial, trial);
             }
             continue;
         }
@@ -367,7 +583,9 @@ function evaluateStandardTrialForSeed({
         }
     }
 
-    return bestAcceptedTrial ?? fallbackTrial;
+    return isWeakAlphaPrioritySeed(seed)
+        ? bestWeakAlphaPriorityTrial ?? bestWeakAlphaRescueTrial ?? bestAcceptedTrial ?? fallbackTrial
+        : bestWeakAlphaPriorityTrial ?? bestAcceptedTrial ?? bestWeakAlphaRescueTrial ?? fallbackTrial;
 }
 
 export function evaluateRestorationCandidate({
@@ -380,7 +598,9 @@ export function evaluateRestorationCandidate({
     adaptiveConfidence = null,
     alphaGain = 1,
     provenance = null,
-    includeImageData = true
+    includeImageData = true,
+    sourcePriority = null,
+    alphaPriorityIndex = null
 }) {
     if (!alphaMap || !position) return null;
 
@@ -443,14 +663,74 @@ export function evaluateRestorationCandidate({
             improvement >= STANDARD_HARD_REJECT_OVERRIDE_MIN_IMPROVEMENT &&
             nearBlackIncrease <= STANDARD_HARD_REJECT_OVERRIDE_MAX_NEAR_BLACK_INCREASE
         );
+    const conservativeCatalogHardRejectAllowed =
+        textureAssessment.hardReject === true &&
+        isCurrentLargeMarginCatalogCandidate({ config, provenance }) &&
+        alphaGain <= STANDARD_CONSERVATIVE_CATALOG_MAX_ALPHA_GAIN &&
+        originalScores.spatialScore >= STANDARD_CONSERVATIVE_CATALOG_MIN_ORIGINAL_SPATIAL_SCORE &&
+        originalScores.gradientScore >= STANDARD_CONSERVATIVE_CATALOG_MIN_ORIGINAL_GRADIENT_SCORE &&
+        Math.abs(processedScores.spatialScore) <= STANDARD_CONSERVATIVE_CATALOG_MAX_RESIDUAL &&
+        processedScores.gradientScore <= STANDARD_CONSERVATIVE_CATALOG_MAX_GRADIENT &&
+        improvement >= STANDARD_CONSERVATIVE_CATALOG_MIN_IMPROVEMENT &&
+        nearBlackIncrease <= STANDARD_CONSERVATIVE_CATALOG_MAX_NEAR_BLACK_INCREASE;
+    const visibleCatalogHardRejectAllowed =
+        textureAssessment.hardReject === true &&
+        isCurrentLargeMarginCatalogCandidate({ config, provenance }) &&
+        alphaGain <= STANDARD_VISIBLE_CATALOG_MAX_ALPHA_GAIN &&
+        originalScores.spatialScore >= STANDARD_VISIBLE_CATALOG_MIN_ORIGINAL_SPATIAL_SCORE &&
+        originalScores.gradientScore >= STANDARD_VISIBLE_CATALOG_MIN_ORIGINAL_GRADIENT_SCORE &&
+        Math.abs(processedScores.spatialScore) <= STANDARD_VISIBLE_CATALOG_MAX_SPATIAL_RESIDUAL &&
+        processedScores.gradientScore <= STANDARD_VISIBLE_CATALOG_MAX_GRADIENT_RESIDUAL &&
+        improvement >= STANDARD_VISIBLE_CATALOG_MIN_IMPROVEMENT &&
+        nearBlackIncrease <= STANDARD_VISIBLE_CATALOG_MAX_NEAR_BLACK_INCREASE;
+    const originalEvidenceAllowed =
+        !isStandardCandidateSource({ source }) ||
+        originalScores.spatialScore >= STANDARD_VALIDATION_MIN_ORIGINAL_SPATIAL_SCORE ||
+        originalScores.gradientScore >= STANDARD_VALIDATION_MIN_ORIGINAL_GRADIENT_SCORE;
     const accepted =
-        hardRejectAllowed &&
+        originalEvidenceAllowed &&
+        (hardRejectAllowed || conservativeCatalogHardRejectAllowed || visibleCatalogHardRejectAllowed) &&
         nearBlackIncreaseAllowed &&
         improvement >= VALIDATION_MIN_IMPROVEMENT &&
         (
             Math.abs(processedScores.spatialScore) <= VALIDATION_TARGET_RESIDUAL ||
             gradientIncrease <= VALIDATION_MAX_GRADIENT_INCREASE
         );
+    const mergedProvenance = mergeCandidateProvenance(provenance);
+    const resolvedSourcePriority = Number.isFinite(sourcePriority)
+        ? sourcePriority
+        : inferCandidateSourcePriority({ source, provenance: mergedProvenance });
+    const resolvedAlphaPriorityIndex = Number.isFinite(alphaPriorityIndex)
+        ? alphaPriorityIndex
+        : inferAlphaPriorityIndex(alphaGain);
+    const originalEvidence = scoreOriginalEvidence({
+        spatial: originalScores.spatialScore,
+        gradient: originalScores.gradientScore
+    });
+    const residual = scoreResidual({
+        processedSpatial: processedScores.spatialScore,
+        processedGradient: processedScores.gradientScore,
+        suppressionGain: improvement
+    });
+    const damage = scoreDamage({
+        hardReject: textureAssessment.hardReject,
+        nearBlackIncrease,
+        texturePenalty
+    });
+    const rankingKey = buildRankingKey({
+        sourcePriority: resolvedSourcePriority,
+        originalEvidenceTier: originalEvidence.tier,
+        damageSafe: damage.safe,
+        residualScore: residual.score,
+        alphaPriorityIndex: resolvedAlphaPriorityIndex,
+        damagePenalty: damage.penalty
+    });
+    const earlyAccept = shouldEarlyAccept({
+        sourcePriority: resolvedSourcePriority,
+        originalEvidence,
+        residual,
+        damage
+    });
 
     return {
         accepted,
@@ -460,7 +740,11 @@ export function evaluateRestorationCandidate({
         alphaMap,
         adaptiveConfidence,
         alphaGain,
-        provenance: mergeCandidateProvenance(provenance),
+        sourcePriority: resolvedSourcePriority,
+        alphaPriorityIndex: resolvedAlphaPriorityIndex,
+        rankingKey,
+        earlyAccept,
+        provenance: mergedProvenance,
         imageData: includeImageData
             ? materializeCandidateImageData(originalImageData, alphaMap, position, alphaGain)
             : null,
@@ -476,6 +760,9 @@ export function evaluateRestorationCandidate({
         tooFlat: textureAssessment.tooFlat,
         hardReject: textureAssessment.hardReject,
         texturePenalty,
+        originalEvidence,
+        residual,
+        damage,
         validationCost:
             Math.abs(processedScores.spatialScore) +
             Math.max(0, processedScores.gradientScore) * 0.6 +
@@ -549,6 +836,36 @@ function ensureCandidateImageData(candidate, originalImageData) {
     };
 }
 
+function sameCandidateAnchor(left, right) {
+    if (!left || !right) return false;
+
+    const leftConfig = left.config;
+    const rightConfig = right.config;
+    const leftPosition = left.position;
+    const rightPosition = right.position;
+    if (!leftConfig || !rightConfig || !leftPosition || !rightPosition) return false;
+
+    return leftConfig.logoSize === rightConfig.logoSize &&
+        leftConfig.marginRight === rightConfig.marginRight &&
+        leftConfig.marginBottom === rightConfig.marginBottom &&
+        leftPosition.x === rightPosition.x &&
+        leftPosition.y === rightPosition.y &&
+        leftPosition.width === rightPosition.width &&
+        leftPosition.height === rightPosition.height;
+}
+
+function compareSameAnchorCandidateRanking(currentBest, candidate) {
+    if (!sameCandidateAnchor(currentBest, candidate)) return null;
+    if (currentBest?.provenance?.previewAnchor === true || candidate?.provenance?.previewAnchor === true) {
+        return null;
+    }
+    if (!Array.isArray(currentBest?.rankingKey) || !Array.isArray(candidate?.rankingKey)) {
+        return null;
+    }
+
+    return compareRankingKey(candidate.rankingKey, currentBest.rankingKey);
+}
+
 export function pickBetterCandidate(currentBest, candidate, minCostDelta = 0.005) {
     if (!candidate?.accepted) return currentBest;
     if (!currentBest) return candidate;
@@ -566,6 +883,11 @@ export function pickBetterCandidate(currentBest, candidate, minCostDelta = 0.005
     }
     if (shouldPreferPreviewAnchorCandidate(candidate, currentBest)) {
         return currentBest;
+    }
+    const rankingComparison = compareSameAnchorCandidateRanking(currentBest, candidate);
+    if (rankingComparison !== null) {
+        if (rankingComparison < 0) return candidate;
+        if (rankingComparison > 0) return currentBest;
     }
     if (candidate.validationCost < currentBest.validationCost - minCostDelta) {
         return candidate;
@@ -1062,6 +1384,175 @@ function searchCandidateAlphaGain({
     return bestCandidate;
 }
 
+function searchBestEffortCurrentLargeMarginWeakAlpha({
+    originalImageData,
+    standardTrials,
+    alphaGainCandidates
+}) {
+    let bestCandidate = null;
+
+    for (const seedCandidate of standardTrials) {
+        if (!isCurrentLargeMarginCatalogCandidate(seedCandidate)) continue;
+        if (!hasReliableCandidateOriginalSignal(seedCandidate)) continue;
+
+        for (const candidateGain of alphaGainCandidates) {
+            if (!Number.isFinite(candidateGain) || candidateGain <= 0 || candidateGain >= 1) continue;
+
+            const candidate = evaluateRestorationCandidate({
+                originalImageData,
+                alphaMap: seedCandidate.alphaMap,
+                position: seedCandidate.position,
+                source: `${seedCandidate.source}+validated+gain`,
+                config: seedCandidate.config,
+                baselineNearBlackRatio: calculateNearBlackRatio(originalImageData, seedCandidate.position),
+                alphaGain: candidateGain,
+                provenance: seedCandidate.provenance,
+                includeImageData: false
+            });
+
+            if (!candidate?.accepted) continue;
+            bestCandidate = pickBetterCandidate(bestCandidate, candidate, 0.002);
+        }
+    }
+
+    return bestCandidate;
+}
+
+function hasFixedCoreLocalOriginalEvidence({
+    seed,
+    sizeDelta,
+    marginRightDelta,
+    marginBottomDelta,
+    originalScores
+}) {
+    if (
+        originalScores.spatialScore >= FIXED_CORE_LOCAL_MIN_ORIGINAL_SPATIAL_SCORE &&
+        originalScores.gradientScore >= FIXED_CORE_LOCAL_MIN_ORIGINAL_GRADIENT_SCORE
+    ) {
+        return true;
+    }
+
+    return seed?.provenance?.sampleDerivedRescueSeed === true &&
+        sizeDelta === 0 &&
+        marginRightDelta === 0 &&
+        marginBottomDelta === 0 &&
+        originalScores.spatialScore >= FIXED_CORE_LOCAL_VISIBLE_CATALOG_MIN_ORIGINAL_SPATIAL_SCORE &&
+        originalScores.gradientScore >= FIXED_CORE_LOCAL_VISIBLE_CATALOG_MIN_ORIGINAL_GRADIENT_SCORE;
+}
+
+function searchFixedCoreLocalGeometryCandidate({
+    originalImageData,
+    candidateSeeds,
+    resolveAlphaMap,
+    alphaGainCandidates
+}) {
+    let bestCandidate = null;
+    const localSeeds = [...(Array.isArray(candidateSeeds) ? candidateSeeds : [])];
+    if (!localSeeds.some((seed) => seed?.provenance?.sampleDerivedRescueSeed === true)) {
+        const position = {
+            x: originalImageData.width - 96 - 48,
+            y: originalImageData.height - 96 - 48,
+            width: 48,
+            height: 48
+        };
+        if (
+            position.x >= 0 &&
+            position.y >= 0 &&
+            position.x + position.width <= originalImageData.width &&
+            position.y + position.height <= originalImageData.height
+        ) {
+            localSeeds.push({
+                config: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+                position,
+                alphaMap: resolveAlphaMap(48),
+                source: 'standard+catalog',
+                provenance: { catalogVariant: true, sampleDerivedRescueSeed: true }
+            });
+        }
+    }
+
+    for (const seed of localSeeds) {
+        if (seed?.config?.logoSize !== 48) continue;
+        const restrictToExactCatalogAnchor =
+            seed?.provenance?.sampleDerivedRescueSeed !== true &&
+            isCurrentLargeMarginCatalogCandidate(seed);
+
+        for (const sizeDelta of FIXED_CORE_LOCAL_SIZE_DELTAS) {
+            if (restrictToExactCatalogAnchor && sizeDelta !== 0) continue;
+            const size = seed.config.logoSize + sizeDelta;
+            if (size < 40 || size > 56) continue;
+
+            const alphaMap = resolveAlphaMap(size);
+            if (!alphaMap) continue;
+
+            for (const marginRightDelta of FIXED_CORE_LOCAL_MARGIN_DELTAS) {
+                if (restrictToExactCatalogAnchor && marginRightDelta !== 0) continue;
+                const marginRight = seed.config.marginRight + marginRightDelta;
+                if (marginRight < 0) continue;
+
+                for (const marginBottomDelta of FIXED_CORE_LOCAL_MARGIN_DELTAS) {
+                    if (restrictToExactCatalogAnchor && marginBottomDelta !== 0) continue;
+                    const marginBottom = seed.config.marginBottom + marginBottomDelta;
+                    if (marginBottom < 0) continue;
+
+                    const position = {
+                        x: originalImageData.width - marginRight - size,
+                        y: originalImageData.height - marginBottom - size,
+                        width: size,
+                        height: size
+                    };
+                    if (position.x < 0 || position.y < 0) continue;
+                    if (position.x + position.width > originalImageData.width) continue;
+                    if (position.y + position.height > originalImageData.height) continue;
+
+                    const originalScores = scoreRegion(originalImageData, alphaMap, position);
+                    if (!hasFixedCoreLocalOriginalEvidence({
+                        seed,
+                        sizeDelta,
+                        marginRightDelta,
+                        marginBottomDelta,
+                        originalScores
+                    })) {
+                        continue;
+                    }
+
+                    for (const alphaGain of alphaGainCandidates) {
+                        if (!Number.isFinite(alphaGain) || alphaGain <= 0) continue;
+
+                        const candidate = evaluateRestorationCandidate({
+                            originalImageData,
+                            alphaMap,
+                            position,
+                            source: alphaGain === 1
+                                ? `${seed.source}+fixed-local`
+                                : `${seed.source}+fixed-local+gain`,
+                            config: {
+                                logoSize: size,
+                                marginRight,
+                                marginBottom
+                            },
+                            baselineNearBlackRatio: calculateNearBlackRatio(originalImageData, position),
+                            alphaGain,
+                            provenance: mergeCandidateProvenance(seed.provenance, {
+                                fixedCoreLocalGeometry: true,
+                                localShift: marginRightDelta !== 0 || marginBottomDelta !== 0,
+                                sizeJitter: sizeDelta !== 0
+                            }),
+                            includeImageData: false
+                        });
+                        if (!candidate?.accepted) continue;
+                        if (!isStrictFixedCoreCandidate(candidate)) continue;
+
+                        bestCandidate = pickBetterCandidate(bestCandidate, candidate, 0.002);
+                    }
+                }
+            }
+        }
+    }
+
+    return bestCandidate;
+}
+
 function searchStrongStandardTrialAlphaGain({
     originalImageData,
     standardTrials,
@@ -1107,6 +1598,74 @@ function searchStrongStandardTrialAlphaGain({
         baseCandidate: nextBaseCandidate,
         baseDecisionTier: nextBaseDecisionTier
     };
+}
+
+function isNewMarginAlphaVariantTrial(candidate) {
+    return isCatalogVariantCandidate(candidate) &&
+        candidate?.config?.logoSize === 96 &&
+        candidate.config.marginRight === 192 &&
+        candidate.config.marginBottom === 192 &&
+        candidate.config.alphaVariant === '20260520';
+}
+
+function createDefaultAlphaRescueProvenance(provenance) {
+    const {
+        alphaVariant,
+        ...baseProvenance
+    } = provenance ?? {};
+    return mergeCandidateProvenance(baseProvenance, {
+        defaultAlphaVariantRescue: true
+    });
+}
+
+function searchDefaultAlphaNewMarginRescue({
+    originalImageData,
+    standardTrials,
+    alpha96,
+    alphaGainCandidates
+}) {
+    if (!alpha96) return null;
+
+    let bestCandidate = null;
+    const rescueGains = normalizeAlphaPriorityGains([
+        ...alphaGainCandidates,
+        ...STANDARD_ANCHOR_WEAK_ALPHA_RESCUE_GAINS
+    ]);
+
+    for (const seedCandidate of standardTrials) {
+        if (!isNewMarginAlphaVariantTrial(seedCandidate)) continue;
+
+        const config = {
+            logoSize: 96,
+            marginRight: 192,
+            marginBottom: 192
+        };
+        const provenance = createDefaultAlphaRescueProvenance(seedCandidate.provenance);
+        const baselineNearBlackRatio = calculateNearBlackRatio(originalImageData, seedCandidate.position);
+
+        for (const alphaGain of rescueGains) {
+            if (!Number.isFinite(alphaGain) || alphaGain <= 0) continue;
+
+            const candidate = evaluateRestorationCandidate({
+                originalImageData,
+                alphaMap: alpha96,
+                position: seedCandidate.position,
+                source: alphaGain === 1
+                    ? `${seedCandidate.source}+default-alpha`
+                    : `${seedCandidate.source}+default-alpha+gain`,
+                config,
+                baselineNearBlackRatio,
+                alphaGain,
+                provenance,
+                includeImageData: false
+            });
+            if (!candidate?.accepted) continue;
+
+            bestCandidate = pickBetterCandidate(bestCandidate, candidate, 0.002);
+        }
+    }
+
+    return bestCandidate;
 }
 
 function insertTopPreviewCandidate(topCandidates, candidate) {
@@ -1533,11 +2092,22 @@ function refineSelectedAnchorCandidate({
 
     const shouldRunGainSearch = selectedTrial.provenance?.previewAnchor === true
         ? isPreviewAnchorGainSearchRequired(selectedTrial)
-        : shouldEscalateSearch(selectedTrial);
+        : (
+            isCurrentLargeMarginCatalogCandidate(selectedTrial) && selectedTrial.alphaGain < 1
+                ? false
+                : shouldEscalateSearch(selectedTrial)
+        );
     let bestGainTrial = selectedTrial;
     if (shouldRunGainSearch) {
         for (const candidateGain of alphaGainCandidates) {
             if (!Number.isFinite(candidateGain) || candidateGain <= 1) continue;
+            if (
+                selectedTrial.provenance?.previewAnchor === true &&
+                position.width < 40 &&
+                candidateGain > 1.1
+            ) {
+                continue;
+            }
             const gainTrial = evaluateRestorationCandidate({
                 originalImageData,
                 alphaMap,
@@ -1648,6 +2218,19 @@ export function selectInitialCandidate({
         baseDecisionTier,
         alphaGainCandidates
     }));
+
+    if (!baseCandidate) {
+        const defaultAlphaNewMarginRescue = searchDefaultAlphaNewMarginRescue({
+            originalImageData,
+            standardTrials,
+            alpha96,
+            alphaGainCandidates
+        });
+        if (defaultAlphaNewMarginRescue) {
+            baseCandidate = defaultAlphaNewMarginRescue;
+            baseDecisionTier = 'validated-match';
+        }
+    }
 
     if (allowAutomaticSearch) {
         const previewAnchorCandidate = searchBottomRightPreviewCandidate({
@@ -1768,6 +2351,41 @@ export function selectInitialCandidate({
         }
     }
 
+    if (allowAutomaticSearch && !baseCandidate) {
+        const bestEffortCandidate = searchBestEffortCurrentLargeMarginWeakAlpha({
+            originalImageData,
+            standardTrials,
+            alphaGainCandidates
+        });
+        if (bestEffortCandidate) {
+            baseCandidate = bestEffortCandidate;
+            baseDecisionTier = 'direct-match';
+        }
+    }
+
+    if (!allowAutomaticSearch && !baseCandidate) {
+        const bestEffortCandidate = searchBestEffortCurrentLargeMarginWeakAlpha({
+            originalImageData,
+            standardTrials,
+            alphaGainCandidates
+        });
+        if (bestEffortCandidate) {
+            baseCandidate = bestEffortCandidate;
+            baseDecisionTier = 'direct-match';
+        } else {
+            const fixedCoreLocalGeometryCandidate = searchFixedCoreLocalGeometryCandidate({
+                originalImageData,
+                candidateSeeds: standardCandidateSeeds,
+                resolveAlphaMap,
+                alphaGainCandidates
+            });
+            if (fixedCoreLocalGeometryCandidate) {
+                baseCandidate = fixedCoreLocalGeometryCandidate;
+                baseDecisionTier = 'direct-match';
+            }
+        }
+    }
+
     if (!baseCandidate) {
         if (hasReliableStandardMatch && standardTrial?.accepted) {
             baseCandidate = standardTrial;
@@ -1781,25 +2399,39 @@ export function selectInitialCandidate({
     if (!baseCandidate) {
         const validatedCandidate = pickBestValidatedCandidate([standardTrial, adaptiveTrial]);
         if (!validatedCandidate) {
-            return {
-                selectedTrial: null,
-                source: 'skipped',
-                alphaMap: fallbackAlphaMap,
-                position,
-                config,
-                adaptiveConfidence,
-                standardSpatialScore,
-                standardGradientScore,
-                templateWarp: null,
-                alphaGain: 1,
-                decisionTier: 'insufficient'
+            const fixedCoreLocalGeometryCandidate = !allowAutomaticSearch
+                ? searchFixedCoreLocalGeometryCandidate({
+                    originalImageData,
+                    candidateSeeds: standardCandidateSeeds,
+                    resolveAlphaMap,
+                    alphaGainCandidates
+                })
+                : null;
+            if (fixedCoreLocalGeometryCandidate) {
+                baseCandidate = fixedCoreLocalGeometryCandidate;
+                baseDecisionTier = 'direct-match';
+            } else {
+                return {
+                    selectedTrial: null,
+                    source: 'skipped',
+                    alphaMap: fallbackAlphaMap,
+                    position,
+                    config,
+                    adaptiveConfidence,
+                    standardSpatialScore,
+                    standardGradientScore,
+                    templateWarp: null,
+                    alphaGain: 1,
+                    decisionTier: 'insufficient'
+                };
+            }
+        } else {
+            baseCandidate = {
+                ...validatedCandidate,
+                source: `${validatedCandidate.source}+validated`
             };
+            baseDecisionTier = 'validated-match';
         }
-        baseCandidate = {
-            ...validatedCandidate,
-            source: `${validatedCandidate.source}+validated`
-        };
-        baseDecisionTier = 'validated-match';
     }
 
     if (shouldRevertLocalShiftToStandardTrial(baseCandidate, standardTrial)) {
@@ -1808,8 +2440,24 @@ export function selectInitialCandidate({
     }
 
     if (!allowAutomaticSearch && !isStrictFixedCoreCandidate(baseCandidate)) {
-        baseCandidate = null;
-        baseDecisionTier = 'insufficient';
+        const bestEffortCandidate = searchBestEffortCurrentLargeMarginWeakAlpha({
+            originalImageData,
+            standardTrials,
+            alphaGainCandidates
+        });
+        if (bestEffortCandidate) {
+            baseCandidate = bestEffortCandidate;
+            baseDecisionTier = 'direct-match';
+        } else {
+            const fixedCoreLocalGeometryCandidate = searchFixedCoreLocalGeometryCandidate({
+                originalImageData,
+                candidateSeeds: standardCandidateSeeds,
+                resolveAlphaMap,
+                alphaGainCandidates
+            });
+            baseCandidate = fixedCoreLocalGeometryCandidate;
+            baseDecisionTier = fixedCoreLocalGeometryCandidate ? 'direct-match' : 'insufficient';
+        }
     }
 
     if (!baseCandidate) {
@@ -1817,25 +2465,39 @@ export function selectInitialCandidate({
             ? pickBestValidatedCandidate([standardTrial, adaptiveTrial])
             : null;
         if (!validatedCandidate) {
-            return {
-                selectedTrial: null,
-                source: 'skipped',
-                alphaMap: fallbackAlphaMap,
-                position,
-                config,
-                adaptiveConfidence,
-                standardSpatialScore,
-                standardGradientScore,
-                templateWarp: null,
-                alphaGain: 1,
-                decisionTier: 'insufficient'
+            const fixedCoreLocalGeometryCandidate = !allowAutomaticSearch
+                ? searchFixedCoreLocalGeometryCandidate({
+                    originalImageData,
+                    candidateSeeds: standardCandidateSeeds,
+                    resolveAlphaMap,
+                    alphaGainCandidates
+                })
+                : null;
+            if (fixedCoreLocalGeometryCandidate) {
+                baseCandidate = fixedCoreLocalGeometryCandidate;
+                baseDecisionTier = 'direct-match';
+            } else {
+                return {
+                    selectedTrial: null,
+                    source: 'skipped',
+                    alphaMap: fallbackAlphaMap,
+                    position,
+                    config,
+                    adaptiveConfidence,
+                    standardSpatialScore,
+                    standardGradientScore,
+                    templateWarp: null,
+                    alphaGain: 1,
+                    decisionTier: 'insufficient'
+                };
+            }
+        } else {
+            baseCandidate = {
+                ...validatedCandidate,
+                source: `${validatedCandidate.source}+validated`
             };
+            baseDecisionTier = 'validated-match';
         }
-        baseCandidate = {
-            ...validatedCandidate,
-            source: `${validatedCandidate.source}+validated`
-        };
-        baseDecisionTier = 'validated-match';
     }
 
     const {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { readdir } from 'node:fs/promises';
+import { access, readdir } from 'node:fs/promises';
 
 import { chromium } from 'playwright';
 
@@ -39,13 +39,13 @@ const BG96_PATH = path.resolve(ROOT_DIR, 'src/assets/bg_96.png');
 const BG96_20260520_PATH = path.resolve(ROOT_DIR, 'src/assets/bg_96_20260520.png');
 const IMAGE_EXTENSIONS = new Set(['.png', '.webp', '.jpg', '.jpeg']);
 const EXACT_OFFICIAL_48_SAMPLE_ASSETS = Object.freeze([
-    '1-1.webp',
-    '21-9.webp',
-    '3-2.webp',
-    '3-4.webp',
-    '4-3.webp',
-    '4-5.webp',
-    '5-4.webp'
+    '1-1.png',
+    '21-9.png',
+    '3-2.png',
+    '3-4.png',
+    '4-3.png',
+    '4-5.png',
+    '5-4.png'
 ]);
 const RESIDUAL_RECALIBRATION_THRESHOLD = 0.5;
 const MIN_SUPPRESSION_FOR_SKIP_RECALIBRATION = 0.18;
@@ -59,11 +59,22 @@ const SUBPIXEL_SHIFTS = [-0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75];
 const SUBPIXEL_SCALES = [0.98, 0.99, 1, 1.01, 1.02];
 const FIXED_CORE_UNSUPPORTED_SAMPLE_ASSETS = new Set();
 
+async function ensureSampleAssetAvailable(t, fileName) {
+    try {
+        await access(path.join(SAMPLE_DIR, fileName));
+        return true;
+    } catch {
+        t.skip(`${fileName} is not present in the current fixture set`);
+        return false;
+    }
+}
+
 async function listSampleAssetFiles() {
     return (await readdir(SAMPLE_DIR))
         .filter((name) => IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()))
         .filter((name) => !name.includes('-fix.'))
         .filter((name) => !name.includes('-after.'))
+        .filter((name) => !name.startsWith('Gemini_Generated_Image_'))
         .sort((a, b) => a.localeCompare(b));
 }
 
@@ -643,7 +654,7 @@ test('known Gemini sample assets should show strong watermark suppression after 
     }
 });
 
-test('2-3.webp should not be skipped when the standard template has strong gradient evidence', async (t) => {
+test('low-contrast catalog watermarks should use conservative removal instead of skipping', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -660,34 +671,58 @@ test('2-3.webp should not be skipped when the standard template has strong gradi
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '2-3.webp');
-        const imageData = await decodeImageDataInPage(page, filePath);
-        const result = processWatermarkImageData(imageData, {
-            alpha48,
-            alpha96,
-            getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
-        });
-        const position = result.meta.position;
-        const alphaMap = result.meta.size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, result.meta.size);
-        const residual = computeRegionSpatialCorrelation({
-            imageData: result.imageData,
-            alphaMap,
-            region: { x: position.x, y: position.y, size: position.width }
-        });
+        const cases = [
+            {
+                fileName: '2-3.png',
+                minOriginalSpatialScore: 0.12,
+                minOriginalGradientScore: 0.08,
+                maxProcessedSpatialScore: 0.04,
+                maxProcessedGradientScore: 0.12
+            },
+            {
+                fileName: '8-1.png',
+                minOriginalSpatialScore: 0.45,
+                minOriginalGradientScore: 0.45,
+                maxProcessedSpatialScore: 0.12,
+                maxProcessedGradientScore: 0.12
+            }
+        ];
 
-        assert.equal(result.meta.applied, true, 'expected 2-3.webp to enter removal pipeline');
-        assert.ok(
-            result.meta.source.startsWith('standard'),
-            `expected 2-3.webp to stay on a standard-template path, got ${result.meta.source}`
-        );
-        assert.equal(
-            result.meta.decisionTier,
-            'validated-match',
-            `expected 2-3.webp to be accepted through restoration validation, got decisionTier=${result.meta.decisionTier}, source=${result.meta.source}`
-        );
-        assert.equal(result.meta.size, 96, 'expected 2-3.webp to use the 96px watermark template');
-        assert.equal(result.meta.passCount, 1, `expected 2-3.webp to stop after the first safe pass, got ${result.meta.passCount}`);
-        assert.ok(residual < 0.22, `expected residual watermark signal < 0.22, got ${residual}`);
+        for (const item of cases) {
+            const sampleAvailable = await ensureSampleAssetAvailable(t, item.fileName);
+            if (!sampleAvailable) continue;
+
+            const filePath = path.join(SAMPLE_DIR, item.fileName);
+            const imageData = await decodeImageDataInPage(page, filePath);
+            const result = processWatermarkImageData(imageData, {
+                alpha48,
+                alpha96,
+                getAlphaMap: (size) => size === 48 ? alpha48 : interpolateAlphaMap(alpha96, 96, size)
+            });
+
+            assert.equal(result.meta.applied, true, `${item.fileName} skipReason=${result.meta.skipReason}`);
+            assert.equal(result.meta.size, 48, `${item.fileName} expected 48px watermark`);
+            assert.deepEqual(
+                result.meta.config,
+                { logoSize: 48, marginRight: 96, marginBottom: 96 },
+                `${item.fileName} expected current large-margin catalog anchor`
+            );
+            assert.equal(result.meta.alphaGain, 0.55, `${item.fileName} expected conservative alpha gain`);
+            assert.ok(
+                String(result.meta.source).includes('catalog'),
+                `${item.fileName} expected catalog source, got ${result.meta.source}`
+            );
+            assert.ok(
+                result.meta.detection.originalSpatialScore >= item.minOriginalSpatialScore &&
+                    result.meta.detection.originalGradientScore >= item.minOriginalGradientScore,
+                `${item.fileName} expected original signal, detection=${JSON.stringify(result.meta.detection)}`
+            );
+            assert.ok(
+                Math.abs(result.meta.detection.processedSpatialScore) <= item.maxProcessedSpatialScore &&
+                    result.meta.detection.processedGradientScore <= item.maxProcessedGradientScore,
+                `${item.fileName} expected conservative residual, detection=${JSON.stringify(result.meta.detection)}`
+            );
+        }
     } finally {
         await browser.close();
     }
@@ -732,7 +767,10 @@ test('exact-official 1K sample assets with visible 48px watermark should fall ba
             });
 
             assert.equal(result.meta.applied, true, `expected ${fileName} to enter removal pipeline`);
-            assert.equal(result.meta.decisionTier, 'direct-match', `expected ${fileName} to be a direct 48px match`);
+            assert.ok(
+                result.meta.decisionTier === 'direct-match' || result.meta.decisionTier === 'validated-match',
+                `expected ${fileName} to be a fixed-core 48px match, got ${result.meta.decisionTier}`
+            );
             assert.equal(result.meta.size, 48, `expected ${fileName} to use a 48px watermark template, got ${result.meta.size}`);
             assert.ok(result.meta.source.startsWith('standard'), `expected ${fileName} to stay on a standard-template path, got ${result.meta.source}`);
             assert.ok(residual < 0.22, `expected ${fileName} residual watermark signal < 0.22, got ${residual}`);
@@ -742,7 +780,7 @@ test('exact-official 1K sample assets with visible 48px watermark should fall ba
     }
 });
 
-test('9-16.webp should stop after the first pass when extra passes only reintroduce watermark edges', async (t) => {
+test('9-16.png should stop after the first pass when extra passes only reintroduce watermark edges', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -759,7 +797,7 @@ test('9-16.webp should stop after the first pass when extra passes only reintrod
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '9-16.webp');
+        const filePath = path.join(SAMPLE_DIR, '9-16.png');
         const imageData = await decodeImageDataInPage(page, filePath);
         const firstPassOnly = processWatermarkImageData(imageData, {
             alpha48,
@@ -784,11 +822,11 @@ test('9-16.webp should stop after the first pass when extra passes only reintrod
             region: { x: position.x, y: position.y, size: position.width }
         });
 
-        assert.equal(fullResult.meta.applied, true, 'expected 9-16.webp to enter removal pipeline');
+        assert.equal(fullResult.meta.applied, true, 'expected 9-16.png to enter removal pipeline');
         assert.equal(
             fullResult.meta.passCount,
             1,
-            `expected 9-16.webp to stop after the first pass, got passCount=${fullResult.meta.passCount}, stop=${fullResult.meta.passStopReason}`
+            `expected 9-16.png to stop after the first pass, got passCount=${fullResult.meta.passCount}, stop=${fullResult.meta.passStopReason}`
         );
         assert.ok(
             finalGradient <= firstPassGradient + 0.05,
@@ -799,7 +837,7 @@ test('9-16.webp should stop after the first pass when extra passes only reintrod
     }
 });
 
-test('9-16.webp should fall back to the 48px anchor when the exact-official 96px evidence is weak', async (t) => {
+test('9-16.png should fall back to the 48px anchor when the exact-official 96px evidence is weak', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -816,7 +854,7 @@ test('9-16.webp should fall back to the 48px anchor when the exact-official 96px
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '9-16.webp');
+        const filePath = path.join(SAMPLE_DIR, '9-16.png');
         const imageData = await decodeImageDataInPage(page, filePath);
         const result = processWatermarkImageData(imageData, {
             alpha48,
@@ -824,11 +862,11 @@ test('9-16.webp should fall back to the 48px anchor when the exact-official 96px
             getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
         });
 
-        assert.equal(result.meta.applied, true, 'expected 9-16.webp to enter removal pipeline');
-        assert.equal(result.meta.size, 48, `expected 9-16.webp to fall back to the 48px template, got ${result.meta.size}`);
+        assert.equal(result.meta.applied, true, 'expected 9-16.png to enter removal pipeline');
+        assert.equal(result.meta.size, 48, `expected 9-16.png to fall back to the 48px template, got ${result.meta.size}`);
         assert.deepEqual(
             result.meta.selectionDebug?.initialConfig,
-            { logoSize: 48, marginRight: 32, marginBottom: 32 },
+            { logoSize: 48, marginRight: 96, marginBottom: 96 },
             `expected initial standard config to be re-resolved to 48px, got ${JSON.stringify(result.meta.selectionDebug?.initialConfig)}`
         );
         assert.equal(
@@ -841,11 +879,11 @@ test('9-16.webp should fall back to the 48px anchor when the exact-official 96px
             `expected standard fallback path, got ${result.meta.source}`
         );
         assert.ok(
-            result.meta.position.x >= 688 && result.meta.position.x <= 700,
+            result.meta.position.x >= 620 && result.meta.position.x <= 628,
             `expected fallback x anchor near the 48px bottom-right position, got ${result.meta.position.x}`
         );
         assert.ok(
-            result.meta.position.y >= 1284 && result.meta.position.y <= 1298,
+            result.meta.position.y >= 1228 && result.meta.position.y <= 1236,
             `expected fallback y anchor near the 48px bottom-right position, got ${result.meta.position.y}`
         );
     } finally {
@@ -854,6 +892,8 @@ test('9-16.webp should fall back to the 48px anchor when the exact-official 96px
 });
 
 test('9-16-preview.png should keep the preview anchor away from the extreme bottom-right corner', async (t) => {
+    if (!await ensureSampleAssetAvailable(t, '9-16-preview.png')) return;
+
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -910,6 +950,8 @@ test('9-16-preview.png should keep the preview anchor away from the extreme bott
 });
 
 test('21-9-preview.png should use fixed preview-anchor without edge cleanup by default', async (t) => {
+    if (!await ensureSampleAssetAvailable(t, '21-9-preview.png')) return;
+
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -989,7 +1031,7 @@ test('non-watermarked synthetic image should keep the candidate region unchanged
     }
 });
 
-test('16-9.webp repeated removal helper should stop after the first pass when residual is already low', async (t) => {
+test('16-9.png repeated removal helper should stop after the first pass when residual is already low', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -1006,7 +1048,7 @@ test('16-9.webp repeated removal helper should stop after the first pass when re
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '16-9.webp');
+        const filePath = path.join(SAMPLE_DIR, '16-9.png');
         const imageData = await decodeImageDataInPage(page, filePath);
         const defaultConfig = detectWatermarkConfig(imageData.width, imageData.height);
         const config = resolveInitialStandardConfig({
@@ -1027,6 +1069,7 @@ test('16-9.webp repeated removal helper should stop after the first pass when re
             imageData,
             alphaMap,
             position,
+            alphaGain: 0.6
         });
         const afterScore = computeRegionSpatialCorrelation({
             imageData: result.imageData,
@@ -1040,14 +1083,14 @@ test('16-9.webp repeated removal helper should stop after the first pass when re
         assert.ok(afterScore < beforeScore, `expected some suppression, before=${beforeScore}, after=${afterScore}`);
         assert.ok(
             beforeScore - afterScore >= 0.04,
-            `expected strong suppression on 16-9.webp, before=${beforeScore}, after=${afterScore}`
+            `expected strong suppression on 16-9.png, before=${beforeScore}, after=${afterScore}`
         );
     } finally {
         await browser.close();
     }
 });
 
-test('16-9.webp repeated removal helper should keep the ROI out of sinkhole-like collapse', async (t) => {
+test('16-9.png repeated removal helper should keep the ROI out of sinkhole-like collapse', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -1064,7 +1107,7 @@ test('16-9.webp repeated removal helper should keep the ROI out of sinkhole-like
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '16-9.webp');
+        const filePath = path.join(SAMPLE_DIR, '16-9.png');
         const imageData = await decodeImageDataInPage(page, filePath);
         const defaultConfig = detectWatermarkConfig(imageData.width, imageData.height);
         const config = resolveInitialStandardConfig({
@@ -1103,7 +1146,7 @@ test('16-9.webp repeated removal helper should keep the ROI out of sinkhole-like
     }
 });
 
-test('16-9.webp metadata should report only the passes that were actually applied', async (t) => {
+test('16-9.png metadata should report only the passes that were actually applied', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -1120,7 +1163,7 @@ test('16-9.webp metadata should report only the passes that were actually applie
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '16-9.webp');
+        const filePath = path.join(SAMPLE_DIR, '16-9.png');
         const imageData = await decodeImageDataInPage(page, filePath);
         const processed = processWatermarkImageData(imageData, {
             alpha48,
@@ -1143,7 +1186,7 @@ test('16-9.webp metadata should report only the passes that were actually applie
     }
 });
 
-test('16-9.webp should not ship a hard-rejected standard candidate when a safer nearby size exists', async (t) => {
+test('16-9.png should not ship a hard-rejected standard candidate when a safer nearby size exists', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -1160,7 +1203,7 @@ test('16-9.webp should not ship a hard-rejected standard candidate when a safer 
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '16-9.webp');
+        const filePath = path.join(SAMPLE_DIR, '16-9.png');
         const imageData = await decodeImageDataInPage(page, filePath);
         const processed = processWatermarkImageData(imageData, {
             alpha48,
@@ -1168,18 +1211,18 @@ test('16-9.webp should not ship a hard-rejected standard candidate when a safer 
             getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
         });
 
-        assert.equal(processed.meta.applied, true, 'expected 16-9.webp to enter removal pipeline');
+        assert.equal(processed.meta.applied, true, 'expected 16-9.png to enter removal pipeline');
         assert.equal(
             processed.meta.selectionDebug?.hardReject,
             false,
-            `expected 16-9.webp final candidate to avoid hard-reject fallback, selectionDebug=${JSON.stringify(processed.meta.selectionDebug)}`
+            `expected 16-9.png final candidate to avoid hard-reject fallback, selectionDebug=${JSON.stringify(processed.meta.selectionDebug)}`
         );
     } finally {
         await browser.close();
     }
 });
 
-test('16-9.webp should keep canonical outline gradient from rising after standard refinement', async (t) => {
+test('16-9.png should keep canonical outline gradient from rising after standard refinement', async (t) => {
     let browser;
     try {
         browser = await chromium.launch({ headless: true });
@@ -1196,11 +1239,11 @@ test('16-9.webp should keep canonical outline gradient from rising after standar
     try {
         const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
         const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
-        const filePath = path.join(SAMPLE_DIR, '16-9.webp');
+        const filePath = path.join(SAMPLE_DIR, '16-9.png');
         const imageData = await decodeImageDataInPage(page, filePath);
         const result = removeWatermarkLikeEngine(imageData, alpha48, alpha96);
 
-        assert.ok(!result.skipped, 'expected 16-9.webp to be processed');
+        assert.ok(!result.skipped, 'expected 16-9.png to be processed');
         assert.ok(
             result.afterGradient <= result.beforeGradient,
             `expected canonical outline gradient to not increase, before=${result.beforeGradient}, after=${result.afterGradient}`

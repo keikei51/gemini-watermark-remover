@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import {
     OFFICIAL_GEMINI_IMAGE_SIZES,
     matchOfficialGeminiImageSize,
+    resolveGeminiWatermarkSearchCatalogEntries,
     resolveGeminiWatermarkSearchConfigs,
+    resolveOfficialGeminiSearchConfigEntries,
     resolveOfficialGeminiSearchConfigs,
     resolveOfficialGeminiWatermarkConfig
 } from '../../src/core/geminiSizeCatalog.js';
@@ -180,12 +182,92 @@ test('resolveOfficialGeminiSearchConfigs should prefer current 48px exact offici
     ]);
 });
 
+test('resolveOfficialGeminiSearchConfigEntries should expose explicit catalog family and priority metadata', () => {
+    const entries = resolveOfficialGeminiSearchConfigEntries(768, 1376);
+
+    assert.deepEqual(
+        entries.map((entry) => ({
+            config: entry.config,
+            family: entry.metadata.family,
+            sourcePriority: entry.metadata.sourcePriority,
+            evidenceGate: entry.metadata.evidenceGate
+        })),
+        [
+            {
+                config: { logoSize: 48, marginRight: 32, marginBottom: 32 },
+                family: 'exact-official-current',
+                sourcePriority: 0,
+                evidenceGate: 'standard'
+            },
+            {
+                config: { logoSize: 48, marginRight: 96, marginBottom: 96 },
+                family: 'known-current-variant',
+                sourcePriority: 1,
+                evidenceGate: 'required'
+            },
+            {
+                config: { logoSize: 96, marginRight: 64, marginBottom: 64 },
+                family: 'exact-official-legacy',
+                sourcePriority: 2,
+                evidenceGate: 'required'
+            }
+        ]
+    );
+});
+
+test('resolveGeminiWatermarkSearchCatalogEntries should preserve legacy config ordering while adding metadata', () => {
+    const defaultConfig = { logoSize: 48, marginRight: 32, marginBottom: 32 };
+    const entries = resolveGeminiWatermarkSearchCatalogEntries(768, 1376, defaultConfig);
+    const configs = resolveGeminiWatermarkSearchConfigs(768, 1376, defaultConfig);
+
+    assert.deepEqual(entries.map((entry) => entry.config), configs);
+    assert.equal(entries[0].metadata.family, 'default-standard');
+    assert.equal(entries[1].metadata.family, 'known-current-variant');
+    assert.equal(entries[1].metadata.sourcePriority, 1);
+});
+
 test('resolveOfficialGeminiSearchConfigs should not add the 192px-margin variant to 0.5K outputs', () => {
     const configs = resolveOfficialGeminiSearchConfigs(512, 512);
 
     assert.deepEqual(configs, [
         { logoSize: 48, marginRight: 32, marginBottom: 32 }
     ]);
+});
+
+test('resolveGeminiWatermarkSearchCatalogEntries should add gated 96px 192px-margin candidate for unknown large Gemini-like outputs', () => {
+    const entries = resolveGeminiWatermarkSearchCatalogEntries(2730, 1536, {
+        logoSize: 96,
+        marginRight: 64,
+        marginBottom: 64
+    });
+    const newMarginEntry = entries.find((entry) => (
+        entry.config.logoSize === 96 &&
+        entry.config.marginRight === 192 &&
+        entry.config.marginBottom === 192
+    ));
+
+    assert.ok(newMarginEntry);
+    assert.equal(newMarginEntry.config.alphaVariant, '20260520');
+    assert.equal(newMarginEntry.metadata.family, 'known-new-margin-variant');
+    assert.equal(newMarginEntry.metadata.evidenceGate, 'required');
+    assert.equal(newMarginEntry.metadata.source, 'unknown-size-new-margin');
+});
+
+test('resolveGeminiWatermarkSearchCatalogEntries should not add unknown-size 96px 192px-margin candidate to official current 1K outputs', () => {
+    const entries = resolveGeminiWatermarkSearchCatalogEntries(768, 1376, {
+        logoSize: 48,
+        marginRight: 32,
+        marginBottom: 32
+    });
+
+    assert.equal(
+        entries.some((entry) => (
+            entry.config.logoSize === 96 &&
+            entry.config.marginRight === 192 &&
+            entry.config.marginBottom === 192
+        )),
+        false
+    );
 });
 
 test('OFFICIAL_GEMINI_IMAGE_SIZES should include every documented Gemini image size', () => {

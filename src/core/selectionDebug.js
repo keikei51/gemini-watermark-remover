@@ -16,6 +16,45 @@ function normalizePosition(position) {
     return { x, y, width, height };
 }
 
+function normalizeNumber(value) {
+    return Number.isFinite(value) ? value : null;
+}
+
+function normalizeResidual(residual) {
+    if (!residual || typeof residual !== 'object') return null;
+    return {
+        cleared: residual.cleared === true,
+        spatialResidual: normalizeNumber(residual.spatialResidual),
+        gradientResidual: normalizeNumber(residual.gradientResidual),
+        suppressionGain: normalizeNumber(residual.suppressionGain),
+        artifactCost: normalizeNumber(residual.artifactCost),
+        score: normalizeNumber(residual.score)
+    };
+}
+
+function normalizeDamage(damage) {
+    if (!damage || typeof damage !== 'object') return null;
+    return {
+        safe: damage.safe === true,
+        penalty: normalizeNumber(damage.penalty),
+        reason: typeof damage.reason === 'string' ? damage.reason : null,
+        nearBlackIncrease: normalizeNumber(damage.nearBlackIncrease),
+        texturePenalty: normalizeNumber(damage.texturePenalty),
+        newlyClippedRatio: normalizeNumber(damage.newlyClippedRatio),
+        halo: damage.halo ?? null
+    };
+}
+
+function normalizeOriginalEvidence(originalEvidence) {
+    if (!originalEvidence || typeof originalEvidence !== 'object') return null;
+    return {
+        tier: typeof originalEvidence.tier === 'string' ? originalEvidence.tier : 'none',
+        spatial: normalizeNumber(originalEvidence.spatial),
+        gradient: normalizeNumber(originalEvidence.gradient),
+        score: normalizeNumber(originalEvidence.score)
+    };
+}
+
 export function createSelectionDebugSummary({
     selectedTrial,
     selectionSource = null,
@@ -34,6 +73,13 @@ export function createSelectionDebugSummary({
         initialPosition: normalizePosition(initialPosition),
         finalConfig: normalizeConfig(selectedTrial.config),
         finalPosition: normalizePosition(selectedTrial.position),
+        sourcePriority: normalizeNumber(selectedTrial.sourcePriority),
+        alphaPriorityIndex: normalizeNumber(selectedTrial.alphaPriorityIndex),
+        rankingKey: Array.isArray(selectedTrial.rankingKey) ? [...selectedTrial.rankingKey] : null,
+        earlyAccept: selectedTrial.earlyAccept === true,
+        originalEvidence: normalizeOriginalEvidence(selectedTrial.originalEvidence),
+        residual: normalizeResidual(selectedTrial.residual),
+        damage: normalizeDamage(selectedTrial.damage),
         texturePenalty: Number.isFinite(selectedTrial.texturePenalty) ? selectedTrial.texturePenalty : null,
         tooDark: selectedTrial.tooDark === true,
         tooFlat: selectedTrial.tooFlat === true,

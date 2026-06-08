@@ -31,6 +31,9 @@ const SUBPIXEL_REFINE_SCALES = [0.99, 1, 1.01];
 const ALPHA_PARAMETER_GROUPS = Object.freeze([
     { name: 'gemini-weak-alpha-202606', alphaGain: 0.6, standardPriority: true },
     { name: 'gemini-standard-alpha', alphaGain: 1, standardPriority: true },
+    { name: 'gemini-strong-alpha-202606', alphaGain: 1.15 },
+    { name: 'gemini-strong-alpha-high-202606', alphaGain: 1.3 },
+    { name: 'weak-alpha-extra-conservative', alphaGain: 0.45 },
     { name: 'weak-alpha-light', alphaGain: 0.7 },
     { name: 'weak-alpha-mid', alphaGain: 0.85 },
     { name: 'weak-alpha-conservative', alphaGain: 0.55 }
@@ -168,7 +171,8 @@ function createWatermarkMeta({
     applied = true,
     skipReason = null,
     subpixelShift = null,
-    selectionDebug = null
+    selectionDebug = null,
+    alphaAdjustmentStages = null
 } = {}) {
     const normalizedPosition = normalizeMetaPosition(position);
 
@@ -197,7 +201,8 @@ function createWatermarkMeta({
         source,
         decisionTier,
         subpixelShift: subpixelShift ?? null,
-        selectionDebug
+        selectionDebug,
+        alphaAdjustmentStages: Array.isArray(alphaAdjustmentStages) ? alphaAdjustmentStages : null
     };
 }
 
@@ -1130,6 +1135,33 @@ export function processWatermarkImageData(imageData, options = {}) {
     let attemptedPassCount = 0;
     let passStopReason = null;
     let passes = null;
+    const alphaAdjustmentStages = [];
+    const recordAlphaAdjustmentStage = ({
+        stage,
+        fromAlphaGain,
+        toAlphaGain,
+        beforeSpatialScore,
+        beforeGradientScore,
+        afterSpatialScore,
+        afterGradientScore,
+        suppressionGain: stageSuppressionGain = null,
+        cost = null
+    }) => {
+        if (!stage || !Number.isFinite(fromAlphaGain) || !Number.isFinite(toAlphaGain)) return;
+        if (Math.abs(fromAlphaGain - toAlphaGain) < 0.0001) return;
+
+        alphaAdjustmentStages.push({
+            stage,
+            fromAlphaGain,
+            toAlphaGain,
+            beforeSpatialScore: Number.isFinite(beforeSpatialScore) ? beforeSpatialScore : null,
+            beforeGradientScore: Number.isFinite(beforeGradientScore) ? beforeGradientScore : null,
+            afterSpatialScore: Number.isFinite(afterSpatialScore) ? afterSpatialScore : null,
+            afterGradientScore: Number.isFinite(afterGradientScore) ? afterGradientScore : null,
+            suppressionGain: Number.isFinite(stageSuppressionGain) ? stageSuppressionGain : null,
+            cost: Number.isFinite(cost) ? cost : null
+        });
+    };
 
     const initialSelectionStartedAt = nowMs();
     const initialSelection = selectInitialCandidate({
@@ -1273,11 +1305,11 @@ export function processWatermarkImageData(imageData, options = {}) {
         });
 
         if (recalibrated) {
-            finalImageData = recalibrated.imageData;
-            alphaGain = recalibrated.alphaGain;
-            finalProcessedSpatialScore = recalibrated.processedSpatialScore;
-            finalProcessedGradientScore = computeRegionGradientCorrelation({
-                imageData: finalImageData,
+            const beforeAlphaGain = alphaGain;
+            const beforeSpatialScore = finalProcessedSpatialScore;
+            const beforeGradientScore = finalProcessedGradientScore;
+            const recalibratedGradientScore = computeRegionGradientCorrelation({
+                imageData: recalibrated.imageData,
                 alphaMap,
                 region: {
                     x: position.x,
@@ -1285,6 +1317,20 @@ export function processWatermarkImageData(imageData, options = {}) {
                     size: position.width
                 }
             });
+            recordAlphaAdjustmentStage({
+                stage: 'recalibration',
+                fromAlphaGain: beforeAlphaGain,
+                toAlphaGain: recalibrated.alphaGain,
+                beforeSpatialScore,
+                beforeGradientScore,
+                afterSpatialScore: recalibrated.processedSpatialScore,
+                afterGradientScore: recalibratedGradientScore,
+                suppressionGain: recalibrated.suppressionGain
+            });
+            finalImageData = recalibrated.imageData;
+            alphaGain = recalibrated.alphaGain;
+            finalProcessedSpatialScore = recalibrated.processedSpatialScore;
+            finalProcessedGradientScore = recalibratedGradientScore;
             suppressionGain = recalibrated.suppressionGain;
             source = source === 'adaptive' ? 'adaptive+gain' : `${source}+gain`;
         }
@@ -1305,6 +1351,17 @@ export function processWatermarkImageData(imageData, options = {}) {
         originalNearBlackRatio: calculateNearBlackRatio(originalImageData, position)
     });
     if (overSubtractionRecalibrated) {
+        recordAlphaAdjustmentStage({
+            stage: 'over-subtraction-recalibration',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: overSubtractionRecalibrated.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: overSubtractionRecalibrated.spatialScore,
+            afterGradientScore: overSubtractionRecalibrated.gradientScore,
+            suppressionGain: overSubtractionRecalibrated.suppressionGain,
+            cost: overSubtractionRecalibrated.cost
+        });
         finalImageData = overSubtractionRecalibrated.imageData;
         alphaGain = overSubtractionRecalibrated.alphaGain;
         finalProcessedSpatialScore = overSubtractionRecalibrated.spatialScore;
@@ -1330,6 +1387,17 @@ export function processWatermarkImageData(imageData, options = {}) {
         originalNearBlackRatio: calculateNearBlackRatio(originalImageData, position)
     });
     if (darkCatalogFineTune) {
+        recordAlphaAdjustmentStage({
+            stage: 'dark-catalog-fine-alpha',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: darkCatalogFineTune.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: darkCatalogFineTune.spatialScore,
+            afterGradientScore: darkCatalogFineTune.gradientScore,
+            suppressionGain: darkCatalogFineTune.suppressionGain,
+            cost: darkCatalogFineTune.cost
+        });
         finalImageData = darkCatalogFineTune.imageData;
         alphaGain = darkCatalogFineTune.alphaGain;
         finalProcessedSpatialScore = darkCatalogFineTune.spatialScore;
@@ -1353,6 +1421,17 @@ export function processWatermarkImageData(imageData, options = {}) {
         originalNearBlackRatio: calculateNearBlackRatio(originalImageData, position)
     });
     if (weakAlphaFineTune) {
+        recordAlphaAdjustmentStage({
+            stage: 'weak-positive-residual-fine-alpha',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: weakAlphaFineTune.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: weakAlphaFineTune.spatialScore,
+            afterGradientScore: weakAlphaFineTune.gradientScore,
+            suppressionGain: weakAlphaFineTune.suppressionGain,
+            cost: weakAlphaFineTune.cost
+        });
         finalImageData = weakAlphaFineTune.imageData;
         alphaGain = weakAlphaFineTune.alphaGain;
         finalProcessedSpatialScore = weakAlphaFineTune.spatialScore;
@@ -1466,6 +1545,16 @@ export function processWatermarkImageData(imageData, options = {}) {
         });
 
         if (refined) {
+            recordAlphaAdjustmentStage({
+                stage: 'subpixel-outline-refinement',
+                fromAlphaGain: alphaGain,
+                toAlphaGain: refined.alphaGain,
+                beforeSpatialScore: finalProcessedSpatialScore,
+                beforeGradientScore: finalProcessedGradientScore,
+                afterSpatialScore: refined.spatialScore,
+                afterGradientScore: refined.gradientScore,
+                cost: refined.cost
+            });
             finalImageData = refined.imageData;
             alphaMap = refined.alphaMap;
             alphaGain = refined.alphaGain;
@@ -1501,6 +1590,17 @@ export function processWatermarkImageData(imageData, options = {}) {
         })
         : null;
     if (smallPreviewRefined) {
+        recordAlphaAdjustmentStage({
+            stage: 'small-preview-refinement',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: smallPreviewRefined.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: smallPreviewRefined.spatialScore,
+            afterGradientScore: smallPreviewRefined.gradientScore,
+            suppressionGain: smallPreviewRefined.suppressionGain,
+            cost: smallPreviewRefined.cost
+        });
         finalImageData = smallPreviewRefined.imageData;
         alphaMap = smallPreviewRefined.alphaMap;
         position = smallPreviewRefined.position;
@@ -1544,6 +1644,7 @@ export function processWatermarkImageData(imageData, options = {}) {
             decisionTier,
             applied: true,
             subpixelShift,
+            alphaAdjustmentStages,
             selectionDebug: createSelectionDebugSummary({
                 selectedTrial,
                 selectionSource: initialSelection.source,

@@ -111,7 +111,7 @@ original = (watermarked - alpha * LOGO_VALUE) / (1 - alpha)
 - `1.05` 到 `2.60` 的强 alpha 候选会把“重复处理/过扣”引入搜索空间。
 - `removeRepeatedWatermarkLayers` 代表把同一区域反复剥离，但如果原图只有一次 alpha composite，多次反解没有数学依据。
 
-这部分近期已经被压缩，但文档上要明确：默认核心不再接受 `alphaGain > 1` 和 multipass，除非有新的生成链路证据证明 Gemini 确实叠加了多层可见水印。
+这部分近期已经被压缩，但文档上要明确：默认核心不再接受大范围强 alpha sweep 和 multipass。`alphaGain > 1` 可以作为受控的标准候选升级路径，但必须由原始水印证据和损伤指标门控，不能恢复历史上 `1.05` 到 `2.60` 的宽扫。
 
 ## 新核心架构
 
@@ -174,13 +174,14 @@ buildPositionCandidates(image)
 全局候选保持小而有序：
 
 ```js
-[0.6, 1, 0.7, 0.85, 0.55]
+[0.6, 1, 1.15, 1.3, 0.7, 0.85, 0.55]
 ```
 
 原因：
 
 - `0.6` 是 202606 新链路高频弱 alpha。
 - `1` 是标准 alpha。
+- `1.15 / 1.3` 是强 alpha 标准候选的受控升级路径，只在候选验证和残留升级阶段发挥作用，不进入初始优先 alpha。
 - `0.7 / 0.85 / 0.55` 是弱 alpha 附近的离散备选。
 - `0.9` 不应放全局；它应从 `1` 过扣后的局部 fine tune 自然出现。
 
@@ -420,7 +421,7 @@ src/core/watermarkProcessor.js
 - 白色高亮图案不应被误判为 watermark。
 - 弱 preview-anchor 不应压过强 catalog。
 - 错误位置 residual 偶然较低也不能胜出。
-- `alphaGain > 1` 默认不进入候选。
+- `alphaGain > 1` 不能做大范围 sweep，也不能绕过原始证据和损伤门控。
 - multipass 默认不进入主流程。
 
 ### 可视化输出
@@ -512,7 +513,7 @@ src/core/watermarkProcessor.js
 - `20260608-4.png`: `48px / r96 b96 / alpha 0.95`
 - `20260608-5.png`: `48px / r96 b96 / alpha 0.64`
 - `20260520-3.png`: 使用 legacy 96 alpha map，避免被新版 alpha 误判。
-- `5-4.webp`: 已恢复为支持样例，依赖固定核心强证据和 near-black 窄例外。
+- `5-4.png`: 已恢复为支持样例，依赖固定核心强证据和 near-black 窄例外。
 
 已通过验证：
 
@@ -583,6 +584,26 @@ Gemini 未来变化时，主要更新 catalog，而不是改核心算法。
 - `artifactCost`: 是否制造了暗边、裁剪、纹理坍塌或局部异常。
 
 最终排序可以使用统一 ranking key，但 debug meta 必须保留分项指标，便于判断是残留问题还是损伤问题。
+
+当前落地状态：
+
+- `src/core/watermarkScoring.js` 已抽出 `scoreOriginalEvidence()`、`scoreResidual()`、`scoreDamage()`、`buildRankingKey()` 和 `shouldEarlyAccept()`。
+- `evaluateRestorationCandidate()` 已在候选对象上输出 `sourcePriority`、`alphaPriorityIndex`、`rankingKey`、`earlyAccept`、`originalEvidence`、`residual` 和 `damage`。
+- `selectionDebug` 已保留上述分项评分，便于从运行 meta 判断候选胜出原因。
+- 生产默认 alpha 候选保持为 `[0.6, 1, 1.15, 1.3, 0.7, 0.85, 0.55]`；其中 `1.15 / 1.3` 不进入初始 standard priority，只作为强证据候选的受控升级路径。额外保守 alpha 仍只作为扫描 / 报告诊断候选，不能进入默认主流程。
+- `sample-benchmark` 的 `candidateRankings` 已输出 `earlyAccept` 与分层 ranking 诊断。
+- `pickBetterCandidate()` 已在同一固定 anchor 内优先使用 `rankingKey` 比较局部候选，主要覆盖 alpha / warp 这类同位置选择。
+- preview-anchor fallback 仍排除在这轮 ranking 迁移之外，避免自动 fallback 通过局部 residual / damage 优势改变既有保护路径。
+- `sample-benchmark` 已在顶层 summary 输出 candidate ranking 健康度。当前样例集结果：selected anchor 在 top list 内为 `25/25`，top accepted 匹配 selected anchor 为 `21/25`，selected exact alpha 在 top list 内为 `21/25`，top accepted 精确匹配 selected alpha 为 `9/25`。
+- `sample-benchmark` 还新增了独立的 `selectedCandidateDiagnostic`，用于记录实际最终输出，包括 fine-alpha 后的评分。当前 `selectedFinalDiagnosticCount = 25/25`，且 selected final 对 gold anchor / alpha 的匹配均为 `25/25`。
+- `selectedCandidateDiagnostic` 已增加 `fineAlphaNeighborhood`，对最终 anchor 枚举离散 alpha、暗 catalog alpha、以及 selected alpha 附近 `±0.02 / ±0.04` 的评分。当前 `selectedFinalFineAlphaNeighborhoodCount = 25/25`，但 selected final alpha 在该邻域排序第一只有 `4/25`。
+- `selectedCandidateDiagnostic` 现在输出 `fineAlphaSelectedRank` 和 `fineAlphaTopAlphaGain`，summary 记录 rank 分布与非 top-1 样例。当前 rank 分布为 `1:4, 2:1, 3:6, 4:3, 5:3, 6:2, 7:2, 8:1, 11:3`；这说明报告 rankingKey 仍明显偏向局部微调 alpha，需要继续对齐生产 fine-alpha 判据。
+- `selectedCandidateDiagnostic` 进一步输出 `fineAlphaSelectionReason`、`fineAlphaSelectedAlphaType`、`fineAlphaTopAlphaType` 和 `fineAlphaTopDelta`。summary 会按原因、是否经过生产 alpha 调整、selected alpha 类型聚合非 top-1 样例，避免只看 rank 数字误判生产选择。
+- 最新分类结果：`production-kept-standard-alpha = 18`、`dark-catalog-fine-alpha = 1`、`weak-positive-residual-fine-alpha = 3`、`direct-discrete-alpha = 3`。非 top-1 样例中 `18` 个没有生产 alpha 调整，主要是生产保留离散 alpha，而报告 rankingKey 偏好 `±0.02 / ±0.04` 的局部微调或暗 catalog 候选；另有 `3` 个经过生产 alpha 调整后仍非 top。
+- summary 还按 `fineAlphaTopDeltaBucket` 聚合 report top 与生产 selected alpha 的差值。当前非 top-1 分布为 `micro-lower = 13`、`small-lower = 3`、`medium-lower = 1`、`large-lower = 1`、`large-higher = 1`、`medium-higher = 1`、`small-higher = 1`。这说明大多数偏差只是报告侧更偏保守的微小 alpha drift；真正需要单独分析的是 medium / large bucket 样例。
+- summary 已单列 `selectedFinalFineAlphaSignificantDeltaSamples`，并附带 selected/top residual、damage 与 `significantDeltaConcern`。当前 significant delta 共 `4` 个：`20260608-2.png` 和 `20260608-4.png` 属于 `report-top-worse-residual`，`21-9.png` 属于 `report-top-damage-risk`，`20260520-3.png` 属于 `direct-match-standard-alpha-priority`。其中 `20260520-3.png` 已确认 report 需要从 `initialConfig` 继承 `alphaVariant = 20260520`，避免误用 current 96 alpha map；修正后 report top 从错误的 `0.45` 收敛为 `0.85`，剩余差异是生产 direct-match 保持标准 alpha 与 artifact-aware report 排序之间的口径分歧。
+- `processWatermarkImageData()` 已在 meta 输出 `alphaAdjustmentStages`，记录生产实际触发的 alpha 调整阶段、前后 alpha、前后 residual 和 cost；`sample-benchmark` 已把这条生产链路带入 `selectedCandidateDiagnostic` 与 summary。当前 `selectedFinalAlphaAdjustmentCount = 4/25`，阶段分布为 `dark-catalog-fine-alpha = 1`、`weak-positive-residual-fine-alpha = 3`；对应样例为 `20260608-4.png`，以及 `20260608-5.png` / `3-2.png` / `9-16.png`。
+- 这些数据说明跨 anchor 的生产选择逻辑仍不能整体替换为 `rankingKey` 排序；离散候选 top-N 与最终 fine-alpha 之间仍存在观测差异，fine-alpha 的生产判据也尚未完全由当前 rankingKey 表达。当前仍保留既有 catalog / local / preview 保护规则；下一步应继续把 fine-alpha 生产判据拆出来复用到报告，或只做更小范围的局部迁移。
 
 ### P4: 可视化调试页
 
