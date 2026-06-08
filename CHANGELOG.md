@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.19 - 2026-06-09
+
+### SDK
+
+- Published the latest Gemini watermark candidate detection improvements as a fresh npm SDK release because `1.0.18` is already present on npm.
+- Kept the SDK packaging surface unchanged so Pilio can depend on the public package instead of maintaining a vendored copy.
+
+### Quality
+
+- Reused the already verified `1.0.18` algorithm build as the baseline for this npm-only release.
+
 ## 1.0.18 - 2026-06-08
 
 ### Watermark Removal
