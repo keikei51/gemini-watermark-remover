@@ -33,6 +33,7 @@ test('package.json should expose the expected local script entrypoints', () => {
     'gate:video-delivery': 'node scripts/run-video-delivery-gate.js',
     'report:video-alpha-policy-evidence': 'node scripts/create-video-alpha-policy-evidence-report.js',
     'report:video-frame-lab': 'node scripts/report-video-frame-lab-sweep.js',
+    'lab:allenk-fdncnn-onnx-frames': 'node scripts/run-allenk-fdncnn-onnx-frame-lab.js',
     'report:video-review-pack': 'node scripts/create-video-review-pack.js',
     'report:video-review-index': 'node scripts/create-video-review-index.js',
     'report:video-review-screenshot': 'node scripts/create-video-review-screenshot.js',
@@ -49,9 +50,17 @@ test('package.json should expose the expected local script entrypoints', () => {
     'report:video-delivery-bundle': 'node scripts/create-video-delivery-bundle.js',
     'verify:video-delivery-bundle': 'node scripts/verify-video-delivery-bundle.js',
     'export:video-backend': 'node scripts/export-video-backend-variant.js',
+    'export:allenk-fdncnn-onnx-video': 'node scripts/export-allenk-fdncnn-onnx-video.js',
+    'export:allenk-fdncnn-onnx-frame-video': 'node scripts/export-allenk-fdncnn-onnx-frame-video.js',
+    'report:allenk-fdncnn-onnx-video-evidence': 'node scripts/create-allenk-fdncnn-onnx-video-evidence.js',
     'export:video-ui-preset': 'node scripts/export-video-ui-preset.js',
     'render:video-comparison-grid': 'node scripts/render-video-comparison-grid.js',
-    'cli:smoke': 'node bin/gwr.mjs --help'
+    'cli:smoke': 'node bin/gwr.mjs --help',
+    'extract:allenk-fdncnn': 'node scripts/extract-allenk-fdncnn-model.js',
+    'export:allenk-fdncnn-onnx': 'node scripts/export-allenk-fdncnn-onnx.js',
+    'smoke:allenk-fdncnn-onnx-runtime': 'node scripts/smoke-allenk-fdncnn-onnx-runtime.js',
+    'report:allenk-fdncnn-browser-spike': 'node scripts/create-allenk-fdncnn-browser-spike-report.js',
+    'report:allenk-fdncnn-runtime-seam': 'node scripts/create-allenk-fdncnn-runtime-seam-report.js'
   };
 
   for (const [scriptName, command] of Object.entries(expectedScripts)) {

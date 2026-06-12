@@ -13,6 +13,21 @@ const VIDEO_INSET_ALPHA_EDGE_BOOST = 0.035;
 const ALPHA_REFINEMENT_ROUNDS = 5;
 const LOGO_VALUE = 255;
 
+function normalizeVideoAlphaProfile(profile) {
+    if (profile === undefined || profile === null || profile === '') {
+        return VIDEO_ALPHA_PROFILE;
+    }
+
+    const text = String(profile).trim();
+    const numeric = Number(text);
+    return Number.isInteger(numeric) && String(numeric) === text ? numeric : text;
+}
+
+function inferSquareAlphaSize(alphaMap, fallbackSize) {
+    const size = Math.round(Math.sqrt(alphaMap.length));
+    return size > 0 && size * size === alphaMap.length ? size : fallbackSize;
+}
+
 export function resizeAlphaMapArea(sourceAlpha, sourceSize, targetSize) {
     if (targetSize <= 0) return new Float32Array(0);
     if (sourceSize === targetSize) return new Float32Array(sourceAlpha);
@@ -73,14 +88,21 @@ export function resolveVideoAlphaEdgeBoost(candidate = null) {
 }
 
 function getVideoAlphaMap(size, options = {}) {
-    const alpha96 = getEmbeddedAlphaMap(VIDEO_ALPHA_PROFILE) || getEmbeddedAlphaMap(96);
-    if (!alpha96) {
+    const profile = normalizeVideoAlphaProfile(options.profile ?? options.alphaProfile);
+    const alphaSource =
+        getEmbeddedAlphaMap(profile) ||
+        getEmbeddedAlphaMap(VIDEO_ALPHA_PROFILE) ||
+        getEmbeddedAlphaMap(96);
+    if (!alphaSource) {
         throw new Error('缺少 96px Gemini alpha map，无法生成视频水印模板');
     }
+    const sourceSize = inferSquareAlphaSize(alphaSource, 96);
     const edgeBoost = Number.isFinite(options.edgeBoost)
         ? options.edgeBoost
         : resolveVideoAlphaEdgeBoost(options.candidate);
-    const resized = size === 96 ? new Float32Array(alpha96) : resizeAlphaMapArea(alpha96, 96, size);
+    const resized = size === sourceSize
+        ? new Float32Array(alphaSource)
+        : resizeAlphaMapArea(alphaSource, sourceSize, size);
     return applyVideoAlphaShapeOptions(enhanceVideoAlphaEdges(resized, size, edgeBoost), options);
 }
 

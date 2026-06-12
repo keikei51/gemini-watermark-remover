@@ -96,6 +96,16 @@ test('getVideoAlphaMap should support experimental low-alpha scaling', () => {
     assert.ok(scaledAlpha[highIndex] > currentAlpha[highIndex]);
 });
 
+test('getVideoAlphaMap should support experimental embedded alpha profile selection', () => {
+    const defaultAlpha = getVideoAlphaMap(96, { edgeBoost: 0 });
+    const legacyAlpha = getVideoAlphaMap(96, { alphaProfile: '96', edgeBoost: 0 });
+    const defaultMax = Math.max(...defaultAlpha);
+    const legacyMax = Math.max(...legacyAlpha);
+
+    assert.notDeepEqual(defaultAlpha, legacyAlpha);
+    assert.ok(legacyMax > defaultMax, { defaultMax, legacyMax });
+});
+
 test('getVideoAlphaMap should support experimental local body scaling', () => {
     const [, inset] = resolveVideoWatermarkCandidates(1920, 1080);
     const currentAlpha = getVideoAlphaMap(inset.size, { candidate: inset });

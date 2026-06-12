@@ -1,9 +1,19 @@
+import {
+    blendAllenkDenoisedRoi,
+    calculateAllenkPaddedRoi,
+    createAllenkGradientMask,
+    embedAllenkRoiWeights,
+    normalizeAllenkFdncnnOptions
+} from '../core/allenkFdncnnDenoise.js';
+
 const DEFAULT_RESIDUAL_CLEANUP_STRENGTH = 1.5;
 const DEFAULT_HIGH_QUALITY_CLEANUP = false;
 const DEFAULT_TEXTURE_REPAIR = false;
 const DEFAULT_TEXTURE_REPAIR_STRENGTH = 0.85;
 const DEFAULT_DENOISE_BACKEND = 'none';
 const DEFAULT_EDGE_DENOISE_STRENGTH = 0.65;
+const DEFAULT_ALLENK_FDNCNN_SIGMA = 25;
+const DEFAULT_ALLENK_FDNCNN_REUSE_THRESHOLD = 6.5;
 
 const VIDEO_CLEANUP_BACKENDS = Object.freeze({
     CANVAS_SOFT: 'canvas-soft',
@@ -12,6 +22,7 @@ const VIDEO_CLEANUP_BACKENDS = Object.freeze({
 
 const VIDEO_DENOISE_BACKENDS = Object.freeze({
     NONE: 'none',
+    ALLENK_FDNCNN_BROWSER_SPIKE: 'allenk-fdncnn-browser-spike',
     CANVAS_EDGE_DENOISE: 'canvas-edge-denoise',
     CANVAS_EDGE_BAND_DENOISE: 'canvas-edge-band-denoise',
     CANVAS_EDGE_CORE_DENOISE: 'canvas-edge-core-denoise',
@@ -79,6 +90,36 @@ function smoothstep(edge0, edge1, value) {
     if (edge0 === edge1) return value >= edge1 ? 1 : 0;
     const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
     return t * t * (3 - 2 * t);
+}
+
+function buildLumaStructureGuard(imageData, strength = 1) {
+    if (!imageData?.data || imageData.width <= 0 || imageData.height <= 0) {
+        return new Float32Array(0);
+    }
+
+    const { width, height, data } = imageData;
+    const guard = new Float32Array(width * height);
+    const sample = (x, y) => {
+        const xx = Math.max(0, Math.min(width - 1, x));
+        const yy = Math.max(0, Math.min(height - 1, y));
+        return lumaAt(data, (yy * width + xx) * 4);
+    };
+    const safeStrength = Math.max(0, Math.min(1, Number.isFinite(strength) ? strength : 1));
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const gx =
+                -sample(x - 1, y - 1) - 2 * sample(x - 1, y) - sample(x - 1, y + 1) +
+                sample(x + 1, y - 1) + 2 * sample(x + 1, y) + sample(x + 1, y + 1);
+            const gy =
+                -sample(x - 1, y - 1) - 2 * sample(x, y - 1) - sample(x + 1, y - 1) +
+                sample(x - 1, y + 1) + 2 * sample(x, y + 1) + sample(x + 1, y + 1);
+            const gradient = Math.sqrt(gx * gx + gy * gy);
+            guard[y * width + x] = smoothstep(42, 150, gradient) * safeStrength;
+        }
+    }
+
+    return gaussianBlurFloatMap(guard, width, height, 0.65, 2);
 }
 
 function gaussianBlurPaddedImageData(imageData, sigma, radius) {
@@ -312,7 +353,10 @@ export function normalizeVideoCleanupOptions(options = {}) {
             ? VIDEO_DENOISE_BACKENDS.CANVAS_TEXTURE_REPAIR
             : DEFAULT_DENOISE_BACKEND;
 
-    return {
+    const edgeDenoiseStrengthLimit = denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE
+        ? 3
+        : 1;
+    const normalized = {
         residualCleanupStrength: Number.isFinite(options.residualCleanupStrength)
             ? Math.max(0, Math.min(1.8, options.residualCleanupStrength))
             : DEFAULT_RESIDUAL_CLEANUP_STRENGTH,
@@ -322,13 +366,33 @@ export function normalizeVideoCleanupOptions(options = {}) {
         highQualityCleanup,
         denoiseBackend,
         edgeDenoiseStrength: Number.isFinite(options.edgeDenoiseStrength)
-            ? Math.max(0, Math.min(1, options.edgeDenoiseStrength))
+            ? Math.max(0, Math.min(edgeDenoiseStrengthLimit, options.edgeDenoiseStrength))
             : DEFAULT_EDGE_DENOISE_STRENGTH,
         textureRepair: denoiseBackend === VIDEO_DENOISE_BACKENDS.CANVAS_TEXTURE_REPAIR,
         textureRepairStrength: Number.isFinite(options.textureRepairStrength)
             ? Math.max(0, Math.min(1, options.textureRepairStrength))
             : DEFAULT_TEXTURE_REPAIR_STRENGTH
     };
+
+    if (denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE) {
+        normalized.allenkFdncnnRuntime = options.allenkFdncnnRuntime || null;
+        normalized.allenkFdncnnSigma = Number.isFinite(options.allenkFdncnnSigma)
+            ? Math.max(0, Math.min(150, options.allenkFdncnnSigma))
+            : DEFAULT_ALLENK_FDNCNN_SIGMA;
+        normalized.allenkFdncnnPadding = Number.isFinite(options.allenkFdncnnPadding)
+            ? Math.max(0, Math.round(options.allenkFdncnnPadding))
+            : undefined;
+        normalized.allenkFdncnnTemporalReuse = options.allenkFdncnnTemporalReuse || null;
+        normalized.allenkFdncnnFrameCache = options.allenkFdncnnFrameCache || null;
+        normalized.denoiseRuntimeStatus = normalized.allenkFdncnnRuntime
+            ? 'available'
+            : 'unavailable';
+        normalized.denoiseRuntimeReason = normalized.allenkFdncnnRuntime
+            ? 'allenk FDnCNN runtime provided'
+            : 'allenk FDnCNN model contract is decoded, but no browser GPU inference runtime is wired yet';
+    }
+
+    return normalized;
 }
 
 export function buildGradientWeightMap(alphaMap, width, height, strength) {
@@ -450,7 +514,16 @@ export function buildEdgeCoreDenoiseWeightMap(alphaMap, width, height, strength)
     return gaussianBlurFloatMap(weights, width, height, 0.35, 1);
 }
 
-function applySoftResidualCleanup(ctx, position, alphaMap, { strength = 0, highQuality = DEFAULT_HIGH_QUALITY_CLEANUP } = {}) {
+function applySoftResidualCleanup(
+    ctx,
+    position,
+    alphaMap,
+    {
+        strength = 0,
+        highQuality = DEFAULT_HIGH_QUALITY_CLEANUP,
+        protectStructure = false
+    } = {}
+) {
     if (!Number.isFinite(strength) || strength <= 0) return;
 
     const padding = Math.max(24, Math.round(Math.min(position.width, position.height) * 0.9));
@@ -463,6 +536,9 @@ function applySoftResidualCleanup(ctx, position, alphaMap, { strength = 0, highQ
     const paddedWeights = mapRoiWeightsToPaddedWeights(roiWeights, position, padded, padX, padY);
     const weights = gaussianBlurFloatMap(paddedWeights, padded.width, padded.height, 1);
     const textureBase = gaussianBlurPaddedImageData(padded, 2.2, 5);
+    const structureGuard = protectStructure
+        ? buildLumaStructureGuard(padded, highQuality ? 0.55 : 0.78)
+        : null;
     let repairedSource;
 
     if (highQuality) {
@@ -488,7 +564,15 @@ function applySoftResidualCleanup(ctx, position, alphaMap, { strength = 0, highQ
 
     for (let pixel = 0; pixel < weights.length; pixel++) {
         const weight = Math.min(1, Math.max(0, weights[pixel]));
-        const blendWeight = Math.min(1, weight * (highQuality ? 1.08 : 1.25));
+        const baseBlendWeight = Math.min(1, weight * (highQuality ? 1.08 : 1.25));
+        const watermarkEdgePressure = smoothstep(0.22, 0.55, weight);
+        const effectiveStructureGuard = structureGuard
+            ? (structureGuard[pixel] || 0) * (1 - watermarkEdgePressure * 0.82)
+            : 0;
+        const structureFactor = structureGuard
+            ? Math.max(0.28, 1 - effectiveStructureGuard)
+            : 1;
+        const blendWeight = baseBlendWeight * structureFactor;
         if (blendWeight <= 0.01) continue;
 
         const idx = pixel * 4;
@@ -756,10 +840,296 @@ function applyTextureRepair(ctx, position, alphaMap, { strength = DEFAULT_TEXTUR
     ctx.putImageData(padded, padX, padY);
 }
 
+function borrowCleanHighpassTexture({
+    targetData,
+    sourceData,
+    weights,
+    width,
+    height,
+    strength = 0.72
+} = {}) {
+    if (
+        !targetData ||
+        !sourceData ||
+        !weights ||
+        targetData.length !== sourceData.length ||
+        width <= 0 ||
+        height <= 0
+    ) {
+        return new Uint8ClampedArray(targetData || 0);
+    }
+
+    const pixelCount = Math.min(weights.length, Math.floor(targetData.length / 4), width * height);
+    const safeStrength = Math.max(0, Math.min(1, Number.isFinite(strength) ? strength : 0.72));
+    if (safeStrength <= 0 || pixelCount <= 0) return new Uint8ClampedArray(targetData);
+
+    const targetBase = gaussianBlurPaddedImageData({ width, height, data: targetData }, 1.25, 3);
+    const sourceBase = gaussianBlurPaddedImageData({ width, height, data: sourceData }, 1.25, 3);
+    const structureGuard = buildLumaStructureGuard({ width, height, data: targetData }, 0.72);
+    const output = new Uint8ClampedArray(targetData);
+    const searchRadius = Math.max(6, Math.round(Math.min(width, height) / 9));
+
+    for (let pixel = 0; pixel < pixelCount; pixel++) {
+        const weight = Math.min(1, Math.max(0, weights[pixel] || 0));
+        const structureFactor = Math.max(0.25, 1 - (structureGuard[pixel] || 0) * 0.72);
+        const targetWeight = smoothstep(0.05, 0.32, weight) *
+            (1 - smoothstep(0.74, 0.98, weight) * 0.18) *
+            structureFactor;
+        if (targetWeight <= 0.01) continue;
+
+        const x = pixel % width;
+        const y = Math.floor(pixel / width);
+        const idx = pixel * 4;
+        const targetBaseLuma = lumaAt(targetBase, idx);
+        let bestPixel = -1;
+        let bestCost = Number.POSITIVE_INFINITY;
+
+        for (let dy = -searchRadius; dy <= searchRadius; dy += 2) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= height) continue;
+
+            for (let dx = -searchRadius; dx <= searchRadius; dx += 2) {
+                const xx = x + dx;
+                if (xx < 0 || xx >= width) continue;
+
+                const candidatePixel = yy * width + xx;
+                if ((weights[candidatePixel] || 0) > 0.018) continue;
+
+                const candidateIdx = candidatePixel * 4;
+                const lumaDelta = Math.abs(lumaAt(sourceBase, candidateIdx) - targetBaseLuma);
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const textureEnergy = (
+                    Math.abs(sourceData[candidateIdx] - sourceBase[candidateIdx]) +
+                    Math.abs(sourceData[candidateIdx + 1] - sourceBase[candidateIdx + 1]) +
+                    Math.abs(sourceData[candidateIdx + 2] - sourceBase[candidateIdx + 2])
+                ) / 3;
+                const cost = lumaDelta * 0.85 + distance * 0.35 - Math.min(18, textureEnergy) * 0.55;
+
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    bestPixel = candidatePixel;
+                }
+            }
+        }
+
+        if (bestPixel < 0) continue;
+
+        const bestIdx = bestPixel * 4;
+        const textureGain = Math.min(0.55, safeStrength * targetWeight);
+        for (let c = 0; c < 3; c++) {
+            const highpass = Math.max(-28, Math.min(28, sourceData[bestIdx + c] - sourceBase[bestIdx + c]));
+            output[idx + c] = Math.max(0, Math.min(255, Math.round(output[idx + c] + highpass * textureGain)));
+        }
+    }
+
+    return output;
+}
+
+function applyAllenkFdncnnRuntime(ctx, position, alphaMap, {
+    runtime = null,
+    sigma = DEFAULT_ALLENK_FDNCNN_SIGMA,
+    strength = DEFAULT_EDGE_DENOISE_STRENGTH,
+    padding = undefined
+} = {}) {
+    if (!runtime || typeof runtime.denoiseImageData !== 'function') {
+        return {
+            denoiseRuntimeStatus: 'unavailable',
+            denoiseRuntimeReason: 'allenk FDnCNN runtime was not provided'
+        };
+    }
+
+    const prepared = prepareAllenkFdncnnRuntimeInput(ctx, position, alphaMap, { sigma, strength, padding });
+    if (!prepared) {
+        return {
+            denoiseRuntimeStatus: 'skipped',
+            denoiseRuntimeReason: 'invalid padded ROI'
+        };
+    }
+    const denoised = runtime.denoiseImageData({
+        imageData: prepared.padded,
+        sigma: prepared.options.sigma
+    });
+    applyAllenkFdncnnDenoisedPatch(ctx, prepared, denoised);
+
+    return {
+        denoiseRuntimeStatus: 'applied',
+        denoiseRuntime: denoised.runtime || runtime.id || 'allenk-fdncnn-runtime',
+        denoiseRuntimeMacs: denoised.macs ?? null,
+        denoiseRuntimeRunMs: denoised.runMs ?? null
+    };
+}
+
+function prepareAllenkFdncnnRuntimeInput(ctx, position, alphaMap, {
+    sigma = DEFAULT_ALLENK_FDNCNN_SIGMA,
+    strength = DEFAULT_EDGE_DENOISE_STRENGTH,
+    padding = undefined
+} = {}) {
+    const options = normalizeAllenkFdncnnOptions({ sigma, strength, padding });
+    const paddedRoi = calculateAllenkPaddedRoi({
+        imageWidth: ctx.canvas.width,
+        imageHeight: ctx.canvas.height,
+        region: position,
+        padding: options.padding
+    });
+    if (!paddedRoi) return null;
+
+    const padded = ctx.getImageData(paddedRoi.x, paddedRoi.y, paddedRoi.width, paddedRoi.height);
+    const roiWeights = createAllenkGradientMask({
+        alphaMap,
+        width: position.width,
+        height: position.height,
+        strength: options.strength
+    });
+    const weights = embedAllenkRoiWeights({
+        roiWeights,
+        roiWidth: position.width,
+        roiHeight: position.height,
+        paddedRoi,
+        blurSigma: 1
+    });
+
+    return {
+        options,
+        paddedRoi,
+        padded,
+        weights
+    };
+}
+
+function applyAllenkFdncnnDenoisedPatch(ctx, prepared, denoised) {
+    const originalData = new Uint8ClampedArray(prepared.padded.data);
+    const blended = blendAllenkDenoisedRoi({
+        originalData,
+        denoisedData: denoised.imageData.data,
+        weights: prepared.weights,
+        width: prepared.padded.width,
+        height: prepared.padded.height
+    });
+
+    prepared.padded.data.set(blended);
+    ctx.putImageData(prepared.padded, prepared.paddedRoi.x, prepared.paddedRoi.y);
+}
+
+function clonePaddedImageData(imageData) {
+    return {
+        width: imageData.width,
+        height: imageData.height,
+        data: new Uint8ClampedArray(imageData.data)
+    };
+}
+
+function cloneDenoisedResult(denoised) {
+    return {
+        ...denoised,
+        imageData: clonePaddedImageData(denoised.imageData)
+    };
+}
+
+function getImageDataLumaChangeScore(current, previous) {
+    if (
+        !current?.data ||
+        !previous?.data ||
+        current.width !== previous.width ||
+        current.height !== previous.height ||
+        current.data.length !== previous.data.length
+    ) {
+        return Infinity;
+    }
+
+    let sum = 0;
+    let count = 0;
+    const currentData = current.data;
+    const previousData = previous.data;
+    for (let i = 0; i < currentData.length; i += 16) {
+        const currentLuma = 0.2126 * currentData[i] + 0.7152 * currentData[i + 1] + 0.0722 * currentData[i + 2];
+        const previousLuma = 0.2126 * previousData[i] + 0.7152 * previousData[i + 1] + 0.0722 * previousData[i + 2];
+        sum += Math.abs(currentLuma - previousLuma);
+        count++;
+    }
+    return count > 0 ? sum / count : Infinity;
+}
+
+function resolveAllenkTemporalReuseConfig(config = null) {
+    if (!config || config.enabled === false) {
+        return null;
+    }
+    const maxFrames = Number.isFinite(config.maxFrames)
+        ? Math.max(0, Math.round(config.maxFrames))
+        : 0;
+    if (maxFrames <= 0) return null;
+    return {
+        maxFrames,
+        threshold: Number.isFinite(config.threshold)
+            ? Math.max(0, config.threshold)
+            : DEFAULT_ALLENK_FDNCNN_REUSE_THRESHOLD
+    };
+}
+
+async function applyAllenkFdncnnRuntimeAsync(ctx, position, alphaMap, {
+    runtime = null,
+    sigma = DEFAULT_ALLENK_FDNCNN_SIGMA,
+    strength = DEFAULT_EDGE_DENOISE_STRENGTH,
+    padding = undefined,
+    temporalReuse = null,
+    frameCache = null
+} = {}) {
+    if (!runtime || typeof runtime.denoiseImageData !== 'function') {
+        return {
+            denoiseRuntimeStatus: 'unavailable',
+            denoiseRuntimeReason: 'allenk FDnCNN runtime was not provided'
+        };
+    }
+
+    const prepared = prepareAllenkFdncnnRuntimeInput(ctx, position, alphaMap, { sigma, strength, padding });
+    if (!prepared) {
+        return {
+            denoiseRuntimeStatus: 'skipped',
+            denoiseRuntimeReason: 'invalid padded ROI'
+        };
+    }
+    const reuseConfig = resolveAllenkTemporalReuseConfig(temporalReuse);
+    const cacheInput = reuseConfig && frameCache ? clonePaddedImageData(prepared.padded) : null;
+    if (reuseConfig && frameCache?.denoised && frameCache?.previousInput) {
+        const changeScore = getImageDataLumaChangeScore(prepared.padded, frameCache.previousInput);
+        const reuseCount = Number.isFinite(frameCache.reuseCount) ? frameCache.reuseCount : 0;
+        if (reuseCount < reuseConfig.maxFrames && changeScore <= reuseConfig.threshold) {
+            applyAllenkFdncnnDenoisedPatch(ctx, prepared, frameCache.denoised);
+            frameCache.previousInput = cacheInput;
+            frameCache.reuseCount = reuseCount + 1;
+            return {
+                denoiseRuntimeStatus: 'reused',
+                denoiseRuntime: `${frameCache.denoised.runtime || runtime.id || 'allenk-fdncnn-runtime'}+temporal-cache`,
+                denoiseRuntimeMacs: 0,
+                denoiseRuntimeRunMs: 0,
+                denoiseRuntimeChangeScore: changeScore,
+                denoiseRuntimeReuseCount: frameCache.reuseCount
+            };
+        }
+    }
+    const denoised = await runtime.denoiseImageData({
+        imageData: prepared.padded,
+        sigma: prepared.options.sigma
+    });
+    applyAllenkFdncnnDenoisedPatch(ctx, prepared, denoised);
+    if (reuseConfig && frameCache) {
+        frameCache.previousInput = cacheInput;
+        frameCache.denoised = cloneDenoisedResult(denoised);
+        frameCache.reuseCount = 0;
+    }
+
+    return {
+        denoiseRuntimeStatus: 'applied',
+        denoiseRuntime: denoised.runtime || runtime.id || 'allenk-fdncnn-runtime',
+        denoiseRuntimeMacs: denoised.macs ?? null,
+        denoiseRuntimeRunMs: denoised.runMs ?? null
+    };
+}
+
 export function applyVideoResidualCleanup(ctx, position, alphaMap, options = {}) {
     const normalized = normalizeVideoCleanupOptions(options);
+    const deferResidualCleanup = normalized.denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE;
 
-    if (normalized.residualCleanupStrength > 0) {
+    if (normalized.residualCleanupStrength > 0 && !deferResidualCleanup) {
         applySoftResidualCleanup(ctx, position, alphaMap, {
             strength: normalized.residualCleanupStrength,
             highQuality: normalized.highQualityCleanup
@@ -786,12 +1156,56 @@ export function applyVideoResidualCleanup(ctx, position, alphaMap, options = {})
         applyTextureRepair(ctx, position, alphaMap, {
             strength: normalized.textureRepairStrength
         });
+    } else if (normalized.denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE) {
+        Object.assign(normalized, applyAllenkFdncnnRuntime(ctx, position, alphaMap, {
+            runtime: normalized.allenkFdncnnRuntime,
+            sigma: normalized.allenkFdncnnSigma,
+            strength: normalized.edgeDenoiseStrength,
+            padding: normalized.allenkFdncnnPadding
+        }));
+    }
+
+    if (normalized.residualCleanupStrength > 0 && deferResidualCleanup) {
+        applySoftResidualCleanup(ctx, position, alphaMap, {
+            strength: normalized.residualCleanupStrength,
+            highQuality: normalized.highQualityCleanup,
+            protectStructure: true
+        });
+    }
+
+    return normalized;
+}
+
+export async function applyVideoResidualCleanupAsync(ctx, position, alphaMap, options = {}) {
+    const normalized = normalizeVideoCleanupOptions(options);
+
+    if (normalized.denoiseBackend !== VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE) {
+        return applyVideoResidualCleanup(ctx, position, alphaMap, options);
+    }
+
+    Object.assign(normalized, await applyAllenkFdncnnRuntimeAsync(ctx, position, alphaMap, {
+        runtime: normalized.allenkFdncnnRuntime,
+        sigma: normalized.allenkFdncnnSigma,
+        strength: normalized.edgeDenoiseStrength,
+        padding: normalized.allenkFdncnnPadding,
+        temporalReuse: normalized.allenkFdncnnTemporalReuse,
+        frameCache: normalized.allenkFdncnnFrameCache
+    }));
+
+    if (normalized.residualCleanupStrength > 0) {
+        applySoftResidualCleanup(ctx, position, alphaMap, {
+            strength: normalized.residualCleanupStrength,
+            highQuality: normalized.highQualityCleanup,
+            protectStructure: true
+        });
     }
 
     return normalized;
 }
 
 export {
+    borrowCleanHighpassTexture,
+    buildLumaStructureGuard,
     DEFAULT_DENOISE_BACKEND,
     DEFAULT_EDGE_DENOISE_STRENGTH,
     DEFAULT_HIGH_QUALITY_CLEANUP,

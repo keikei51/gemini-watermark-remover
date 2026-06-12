@@ -27,6 +27,7 @@ import {
     DEFAULT_TEXTURE_REPAIR_STRENGTH,
     VIDEO_DENOISE_BACKENDS,
     applyVideoResidualCleanup,
+    applyVideoResidualCleanupAsync,
     normalizeVideoCleanupOptions
 } from './videoCleanupBackends.js';
 
@@ -285,6 +286,7 @@ export async function detectGeminiVideoWatermark(file, options = {}) {
             candidates: options.candidates,
             minConfidence: options.minConfidence,
             alphaMapOptions: {
+                profile: options.alphaProfile,
                 lowAlphaScale: options.alphaLowScale,
                 bodyAlphaScale: options.alphaBodyScale,
                 edgeBoost: options.alphaEdgeBoost,
@@ -703,6 +705,8 @@ function processWatermarkRoi(ctx, detection, options) {
         highQualityCleanup: options.highQualityCleanup,
         denoiseBackend: options.denoiseBackend,
         edgeDenoiseStrength: options.edgeDenoiseStrength,
+        allenkFdncnnRuntime: options.allenkFdncnnRuntime,
+        allenkFdncnnSigma: options.allenkFdncnnSigma,
         textureRepair: options.textureRepair,
         textureRepairStrength: options.textureRepairStrength
     });
@@ -733,6 +737,70 @@ function processWatermarkRoi(ctx, detection, options) {
     };
 }
 
+async function processWatermarkRoiAsync(ctx, detection, options) {
+    const shouldUseAsyncCleanup = options.denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE &&
+        options.allenkFdncnnRuntime;
+    if (!shouldUseAsyncCleanup) {
+        return processWatermarkRoi(ctx, detection, options);
+    }
+
+    const { position, alphaMap } = detection;
+    const frameScore = scoreVideoWatermarkFrame(
+        ctx.getImageData(position.x, position.y, position.width, position.height),
+        { x: 0, y: 0, width: position.width, height: position.height },
+        alphaMap
+    );
+    const shouldSkip = frameScore.confidence < options.lowConfidenceThreshold;
+
+    if (shouldSkip) {
+        return {
+            alphaGain: options.previousAlphaGain ?? options.seedAlphaGain,
+            frameScore,
+            skipped: true,
+            mode: 'skip'
+        };
+    }
+
+    const roi = ctx.getImageData(position.x, position.y, position.width, position.height);
+    const useAdaptiveAlpha = options.adaptiveAlpha && frameScore.confidence >= options.highConfidenceThreshold;
+    const alphaGain = useAdaptiveAlpha
+        ? refineAlphaGain({
+            ctx,
+            originalRoi: roi,
+            position,
+            alphaMap,
+            seedGain: options.seedAlphaGain,
+            previousGain: options.previousAlphaGain
+        })
+        : options.seedAlphaGain;
+    const processed = applyRoiRemoval(roi, alphaMap, alphaGain);
+    ctx.putImageData(processed, position.x, position.y);
+    const cleanupResult = await applyVideoResidualCleanupAsync(ctx, position, alphaMap, {
+        residualCleanupStrength: options.residualCleanupStrength,
+        highQualityCleanup: options.highQualityCleanup,
+        denoiseBackend: options.denoiseBackend,
+        edgeDenoiseStrength: options.edgeDenoiseStrength,
+        allenkFdncnnRuntime: options.allenkFdncnnRuntime,
+        allenkFdncnnSigma: options.allenkFdncnnSigma,
+        allenkFdncnnPadding: options.allenkFdncnnPadding,
+        allenkFdncnnTemporalReuse: options.allenkFdncnnTemporalReuse,
+        allenkFdncnnFrameCache: options.allenkFdncnnFrameCache,
+        textureRepair: options.textureRepair,
+        textureRepairStrength: options.textureRepairStrength
+    });
+
+    return {
+        alphaGain,
+        frameScore,
+        skipped: false,
+        mode: useAdaptiveAlpha ? 'adaptive' : 'seed',
+        temporalRoi: null,
+        temporalDeltaFrame: null,
+        temporalMatchDeltaFrame: null,
+        cleanupResult
+    };
+}
+
 export async function removeGeminiVideoWatermark(file, options = {}) {
     const requestedAlphaGain = Number.isFinite(options.alphaGain) && options.alphaGain > 0
         ? options.alphaGain
@@ -747,7 +815,8 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
         denoiseBackend,
         edgeDenoiseStrength,
         textureRepair,
-        textureRepairStrength
+        textureRepairStrength,
+        allenkFdncnnPadding
     } = cleanupOptions;
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
     const videoBitrate = resolveVideoBitrate(options.videoBitrate);
@@ -757,6 +826,7 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
         sampleCount: options.sampleCount,
         minConfidence: options.minConfidence,
         candidates: options.candidates,
+        alphaProfile: options.alphaProfile,
         alphaLowScale: options.alphaLowScale,
         alphaBodyScale: options.alphaBodyScale,
         alphaEdgeBoost: options.alphaEdgeBoost,
@@ -818,11 +888,16 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
     let skippedFrames = 0;
     let adaptiveFrames = 0;
     let seedFrames = 0;
+    let aiDenoiseFrames = 0;
+    let aiReuseFrames = 0;
     let lastTimestamp = -Infinity;
     let previousAlphaGain = null;
     let previousTemporalRoi = null;
     let previousTemporalDeltaFrame = null;
     let previousTemporalMatchDeltaFrame = null;
+    const allenkFdncnnFrameCache = denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE
+        ? {}
+        : null;
     const fallbackDuration = metadata.frameRate > 0 ? 1 / metadata.frameRate : 1 / 30;
 
     try {
@@ -841,7 +916,7 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
 
             try {
                 sample.draw(ctx, 0, 0, metadata.width, metadata.height);
-                const frameResult = processWatermarkRoi(ctx, detection, {
+                const frameResult = await processWatermarkRoiAsync(ctx, detection, {
                     seedAlphaGain: alphaGain,
                     previousAlphaGain,
                     adaptiveAlpha,
@@ -851,6 +926,11 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
                     edgeDenoiseStrength,
                     textureRepair,
                     textureRepairStrength,
+                    allenkFdncnnRuntime: options.allenkFdncnnRuntime,
+                    allenkFdncnnSigma: options.allenkFdncnnSigma,
+                    allenkFdncnnPadding,
+                    allenkFdncnnTemporalReuse: options.allenkFdncnnTemporalReuse,
+                    allenkFdncnnFrameCache,
                     previousTemporalRoi,
                     previousTemporalDeltaFrame,
                     previousTemporalMatchDeltaFrame,
@@ -858,6 +938,12 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
                     lowConfidenceThreshold: options.lowConfidenceThreshold ?? FRAME_LOW_CONFIDENCE
                 });
                 previousAlphaGain = frameResult.alphaGain;
+                const denoiseStatus = frameResult.cleanupResult?.denoiseRuntimeStatus;
+                if (denoiseStatus === 'applied') {
+                    aiDenoiseFrames++;
+                } else if (denoiseStatus === 'reused') {
+                    aiReuseFrames++;
+                }
                 if (frameResult.skipped) {
                     skippedFrames++;
                     previousTemporalRoi = null;
@@ -898,6 +984,8 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
                 skippedFrames,
                 adaptiveFrames,
                 seedFrames,
+                aiDenoiseFrames,
+                aiReuseFrames,
                 alphaGain
             });
         }
@@ -919,6 +1007,7 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
             highQualityCleanup,
             denoiseBackend,
             edgeDenoiseStrength,
+            allenkFdncnnPadding,
             textureRepair,
             textureRepairStrength,
             residualCleanupStrength,
@@ -931,7 +1020,9 @@ export async function removeGeminiVideoWatermark(file, options = {}) {
             processedFrames,
             skippedFrames,
             adaptiveFrames,
-            seedFrames
+            seedFrames,
+            aiDenoiseFrames,
+            aiReuseFrames
         };
     } catch (error) {
         if (output.state !== 'finalized' && output.state !== 'canceled') {

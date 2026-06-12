@@ -270,10 +270,15 @@ function finalizeCandidate(group, requiredLayerCount) {
     const warningLayers = layers.filter((layer) => layer.summary.verdict === 'warning');
     const improvedCases = layers.reduce((sum, layer) => sum + layer.summary.improved, 0);
     const missingLayerCount = Math.max(0, requiredLayerCount - layers.length);
+    const syntheticSeamOnly = layers.length > 0 && layers.every((layer) => {
+        return layer.cases.length > 0 && layer.cases.every((item) => item.profile?.syntheticSeamFixture === true);
+    });
 
     const decision = materialFailureLayers.length > 0
         ? 'reject'
-        : missingLayerCount > 0
+        : syntheticSeamOnly
+            ? 'synthetic-seam-evidence-only'
+            : missingLayerCount > 0
             ? 'insufficient-evidence'
             : improvedCases <= 0
                 ? 'insufficient-improvement'
@@ -290,7 +295,8 @@ function finalizeCandidate(group, requiredLayerCount) {
             missingLayerCount,
             improvedCases,
             materialFailureLayers: materialFailureLayers.length,
-            warningLayers: warningLayers.length
+            warningLayers: warningLayers.length,
+            syntheticSeamOnly
         },
         decision
     };

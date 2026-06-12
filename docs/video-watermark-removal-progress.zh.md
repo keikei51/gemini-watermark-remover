@@ -2392,6 +2392,187 @@ rtk pnpm analyze:video-residual -- --current .artifacts\video-alpha-research\4d4
     - `15` tests passed
   - `pnpm build`
     - passed
+
+### 2026-06-12 allenk 源码对齐：纯梯度 mask 与默认 AI 参数
+
+- 触发原因：
+  - 用户反馈“纹理重建效果还是不好”，并建议直接多看 allenk 源码；
+  - 之前的 highpass 回灌 / clean-neighbor 纹理借用只能微调纹理，不能解释与 allenk 的根本差距。
+- allenk 源码结论：
+  - 核心文件：
+    - `.artifacts/external-repos/GeminiWatermarkTool/src/core/ai_denoise.cpp`
+    - `.artifacts/external-repos/GeminiWatermarkTool/src/core/watermark_engine.cpp`
+  - FDnCNN pipeline 明确是：
+    - 先 reverse alpha；
+    - 对 alpha map resize 到实际 watermark region；
+    - Sobel 梯度 -> normalize -> sqrt -> 5x5 ellipse dilate -> GaussianBlur sigma 2；
+    - 再把 mask embed 到 padded ROI，并 blur sigma 1；
+    - `result = weight * denoised + (1 - weight) * original`；
+    - 注释明确：`only repair edge pixels`。
+  - allenk 不是把水印主体整体交给 AI 修复；我们的旧实现额外加入 `footprintStrength`，导致水印主体/暗色纹理区域更容易被 FDnCNN 抹平。
+- 本轮代码调整：
+  - `src/core/allenkFdncnnDenoise.js`
+    - `createAllenkGradientMask()` 去掉 footprint/body 权重；
+    - 当传入 alpha map 与 ROI 尺寸不一致时，先 resize 到 ROI 尺寸，再计算梯度 mask；
+    - 新增 resize 相关单测，防止 96px alpha 被当成 72px 左上角截读。
+  - `src/video/videoCleanupBackends.js`
+    - allenk FDnCNN patch 回到纯 mask blend；
+    - 默认路径不再追加 `preserveHighpassStrength` 和 `borrowCleanHighpassTexture()`。
+  - `src/video/videoPresetPolicy.js`
+    - 自动 AI 预设从保守 `edgeDenoiseStrength=0.25` 调整为 `1.8`；
+    - AI 自动预设的后置 residual cleanup 调整为 `0`，避免用软清理掩盖 AI 过度平滑。
+- 约束发现：
+  - allenk NCNN 路径可使用 `padding=32`；
+  - 当前浏览器 ONNX 模型是固定 `104x104`，对应 72px watermark + 16px padding；
+  - 尝试把浏览器 padding 改为 32 会失败：
+    - `allenk FDnCNN ONNX runtime expected 104x104, got 136x136`
+  - 因此浏览器默认仍保留 `allenkFdncnnPadding=16`，后续若要继续追 allenk，需要导出/接入动态 ROI 或 136/200 尺寸模型。
+- 新证据：
+  - 输出视频：
+    - `.artifacts/browser-native-default-gate/4d420881-allenk-aligned-ai-after-1s.mp4`
+  - 右下 ROI 对比图：
+    - `.artifacts/browser-native-default-gate/4d420881-allenk-aligned-roi-compare.png`
+- 视觉结论：
+  - 新策略的水印主体压制明显强于旧保守 AI；
+  - 仍能看到一块比 allenk 更平滑的暗斑；
+  - 这更像是固定 104 ROI / ONNX 模型输入尺寸与 allenk 动态 NCNN 上下文不同造成的差距，而不是继续叠后处理能解决的问题。
+- 验证：
+  - `pnpm exec node --test tests/core/allenkFdncnnDenoise.test.js tests/video/videoCleanupBackends.test.js tests/video/videoPresetPolicy.test.js`
+    - `39` tests passed
+  - `pnpm build`
+    - passed
+
+### 2026-06-12 默认切换到 200x200 FDnCNN ONNX
+
+- 用户决策：
+  - 不再先试 `136x136`；
+  - 直接使用接近 allenk 日志规格的 `200x200` ROI。
+- 本轮代码调整：
+  - 复制模型资产：
+    - from `.artifacts/allenk-fdncnn/roi200/model_core_fp32_200.onnx`
+    - to `public/models/allenk-fdncnn/model_core_fp32_200.onnx`
+  - `src/video-app.js`
+    - 模型 URL 改为 `./models/allenk-fdncnn/model_core_fp32_200.onnx`
+    - 输入 shape 改为 `[1, 4, 200, 200]`
+    - 输出 shape 改为 `[1, 3, 200, 200]`
+    - `allenkFdncnnPadding` 改为 `64`，对应 `72px watermark + 64px*2 = 200px`
+    - 手动切换到 AI backend 时，默认 strength 从旧的 `0.25` 改为 `1.8`
+- 验证导出：
+  - 命令：
+    - `pnpm export:video-backend -- --input .artifacts/browser-native-default-gate/4d420881-source-1s.mp4 --output .artifacts/browser-native-default-gate/4d420881-ai-roi200-after-1s.mp4 --page http://127.0.0.1:4173/video-preview.html --denoise-backend allenk-fdncnn-browser-spike --edge-denoise-strength 1.8 --residual-cleanup-strength 0 --allow-low-confidence --timeout-ms 420000`
+  - 输出：
+    - `.artifacts/browser-native-default-gate/4d420881-ai-roi200-after-1s.mp4`
+  - 结果：
+    - `24` frames processed
+    - 1s 样片耗时约 `51s`
+    - `no-audio-track`
+  - 对比图：
+    - `.artifacts/browser-native-default-gate/4d420881-roi104-roi200-allenk-compare.png`
+- 视觉判断：
+  - `200x200` 已经真正加载到 dist bundle：
+    - `dist/video-app.js` 包含 `model_core_fp32_200.onnx`
+    - shape 为 `[1,4,200,200]`
+    - padding 为 `64`
+  - 与 `104x104` 相比，右下 ROI 视觉改善不明显；
+  - 与 allenk 仍有纹理自然度差距；
+  - 这说明剩余差距可能不只是 ROI 大小，还包括 allenk 的 NCNN 推理细节、视频编码/颜色路径、alpha profile 或候选锁定/seed scale 差异。
+- 验证：
+  - `pnpm build`
+    - passed
+
+### 2026-06-12 纹理重建复盘：后处理补纹理收益有限
+
+- 用户反馈：
+  - 默认 AI 输出仍偏“塑料糊”，纹理重建效果不好；
+  - 目标从继续压残影转为确认纹理损失的真正来源。
+- 本轮实现/调试能力：
+  - `src/video/videoCleanupBackends.js`
+    - 新增 `borrowCleanHighpassTexture()`；
+    - 从低水印权重的干净邻域借高频纹理，不再从水印覆盖区直接回灌高频；
+    - AI 后的本地 highpass 回灌从 `0.32` 降到 `0.12`，避免把水印自身高频带回来；
+    - AI backend 的 `edgeDenoiseStrength` 归一化上限从 `1` 放宽到 `3`，用于对齐 allenk 日志中的 `strength=180%` 调试。
+  - `src/core/allenkFdncnnDenoise.js`
+    - `createAllenkGradientMask()` 默认 `footprintStrength` 从 `0.65` 降到 `0.32`；
+    - 目的：减少 AI 对水印主体内部的平滑，更多保留 reverse-alpha 后的原始纹理。
+  - `src/video-app.js`
+    - 新增调试覆写：
+      - `window.__gwrVideoOverrideEdgeDenoiseStrength`
+      - `window.__gwrVideoOverrideResidualCleanupStrength`
+    - 覆写发生在自动 preset 之后，避免调试参数被默认 preset 重置。
+  - `scripts/export-video-backend-variant.js`
+    - 隐藏控件可被脚本设置；
+    - `--page` 支持 HTTP URL；
+    - 新增 `--residual-cleanup-strength`；
+    - AI backend 可测 `edgeDenoiseStrength > 1`。
+- 实验结论：
+  1. **纹理借用/合成 v1-v2：收益很小**
+     - 输出：
+       - `.artifacts/browser-native-default-gate/4d420881-texture-synth-v2-after-1s.mp4`
+       - `.artifacts/browser-native-default-gate/deaee69b-texture-synth-v2-after-1s.mp4`
+       - `.artifacts/browser-native-default-gate/e1997e6e-texture-synth-v2-after-1s.mp4`
+     - 对比：
+       - `.artifacts/browser-native-default-gate/4d420881-source-guard-v2-texture-synth-v2-allenk-compare.png`
+       - `.artifacts/browser-native-default-gate/deaee69b-source-guard-v2-texture-synth-v2-allenk-compare.png`
+       - `.artifacts/browser-native-default-gate/e1997e6e-source-guard-v2-texture-synth-v2-allenk-compare.png`
+     - 视觉判断：
+       - 没有明显假噪；
+       - 但纹理恢复幅度太小，不能解决“塑料糊”。
+  2. **AI strength 1.0 / 1.8：不是答案**
+     - allenk 日志显示：
+       - `sigma=75`
+       - `strength=180%`
+       - `roi=200x200`
+     - 浏览器实测：
+       - `.artifacts/browser-native-default-gate/4d420881-ai-strength100-v2-after-1s.mp4`
+       - `.artifacts/browser-native-default-gate/e1997e6e-ai-strength100-v2-after-1s.mp4`
+       - `.artifacts/browser-native-default-gate/4d420881-ai-strength180-after-1s.mp4`
+       - `.artifacts/browser-native-default-gate/e1997e6e-ai-strength180-after-1s.mp4`
+     - 对比：
+       - `.artifacts/browser-native-default-gate/4d420881-strength025-vs-strength180-allenk-compare.png`
+       - `.artifacts/browser-native-default-gate/e1997e6e-strength025-vs-strength180-allenk-compare.png`
+     - 视觉判断：
+       - 强度增大可以略压残影；
+       - 但纹理更平滑，不能接近 allenk。
+  3. **ROI200 + strength1.8：质量未显著改善，性能不可接受**
+     - 命令：
+       - `pnpm export:allenk-fdncnn-onnx-frame-video -- --manifest .artifacts/allenk-fdncnn/roi200/onnx-manifest.json --case 4d420881 --duration 1 --padding 64 --sigma 75 --strength 1.8 --crf 12 --preset medium --output-dir .artifacts/allenk-fdncnn/video-frame-export-4d420881-roi200-pad64-strength180-1s`
+     - 输出：
+       - `.artifacts/allenk-fdncnn/video-frame-export-4d420881-roi200-pad64-strength180-1s/4d420881-pad16-strength025.mp4`
+     - avg runtime：`~1957.8ms/frame`
+     - 对比：
+       - `.artifacts/browser-native-default-gate/4d420881-strength025-vs-roi200-strength180-allenk-compare.png`
+     - 判断：
+       - 慢；
+       - 仍不恢复 allenk 的颗粒质感；
+       - 不进入默认。
+  4. **residual cleanup 不能关，0.8 也不够稳**
+     - `residualCleanupStrength=0`：
+       - `.artifacts/browser-native-default-gate/4d420881-residual0-after-1s.mp4`
+       - `.artifacts/browser-native-default-gate/e1997e6e-residual0-after-1s.mp4`
+       - 对比：
+         - `.artifacts/browser-native-default-gate/4d420881-body-light-vs-residual0-allenk-compare.png`
+         - `.artifacts/browser-native-default-gate/e1997e6e-body-light-vs-residual0-allenk-compare.png`
+       - 纹理略回，但星形轮廓明显回归，不可用。
+     - `residualCleanupStrength=0.8`：
+       - `.artifacts/browser-native-default-gate/4d420881-cleanup080-after-1s.mp4`
+       - `.artifacts/browser-native-default-gate/e1997e6e-cleanup080-after-1s.mp4`
+       - 对比：
+         - `.artifacts/browser-native-default-gate/4d420881-cleanup150-vs-cleanup080-allenk-compare.png`
+         - `.artifacts/browser-native-default-gate/e1997e6e-cleanup150-vs-cleanup080-allenk-compare.png`
+       - 仍有明显轮廓残留，也不适合作为默认。
+- 当前判断：
+  - 纹理损失不是单纯“后处理强度”问题；
+  - 后处理补纹理只能微调，不能真正学习 allenk；
+  - allenk 更可能在 **reverse-alpha 主体保留 + 只对边缘/残影区域 denoise** 的边界选择上更准；
+  - 下一步值得做：
+    1. 从 allenk 输出反推其实际 denoise mask，而不是继续调全局 strength；
+    2. 对比 `before -> allenk` 的修改区域，估算 allenk 哪些 alpha/gradient 区域没有动；
+    3. 把我们的 AI mask 从 `alpha footprint + edge` 改为更接近 allenk 的“edge/residual-only mask”。
+- 验证：
+  - `pnpm exec node --test tests/video/videoCleanupBackends.test.js tests/core/allenkFdncnnDenoise.test.js tests/video/videoPresetPolicy.test.js tests/core/allenkFdncnnOnnxRuntime.test.js tests/scripts/scriptEntrypoints.test.js`
+    - `41` tests passed
+  - `pnpm build`
+    - passed
 - 更新判断：
   - 简单相邻帧 ROI 混合没有成为可用默认候选。
   - `0.65` 强度在 relocated 样例上回归明显。
@@ -4701,3 +4882,797 @@ pnpm report:video-delivery-bundle
   - `alphaEdgePolicy=standard045-inset035` 是非 denoise 的 alpha policy 候选；通用 denoise gate 的 raw strict `reject` 用来防止自动 promote，专门 alpha evidence 的 `candidate-aware-human-review` 用来保留人工复核入口。
   - 当前不新增伪 AI 后端，也不把旧 canvas denoise 作为发版亮点。
   - 下一步的视频 V2 质量突破应基于此 gate 接入真正的 ROI denoise 候选，例如 WebGPU / WebNN / tiny-CNN 原型；候选必须先跨 frame lab 与 video benchmark 再进入人工视觉审阅。
+
+### 2026-06-12 allenk FDnCNN Model Extraction
+
+- 背景：
+  - 用户复核视频对比后，确认当前 Canvas / alpha / temporal cleanup 路线仍会在右下角复杂纹理、车灯、格栅、深色塑料等区域留下明显水印残影。
+  - 根本差距不是单个阈值，而是 allenk `GeminiWatermarkTool` 使用了 ROI 级 FDnCNN AI denoise 后端；我们当前浏览器 MVP 仍主要依赖解析式反混合和轻量 Canvas 清理。
+- allenk 可复用信息：
+  - upstream: `allenk/GeminiWatermarkTool`
+  - license: MIT
+  - 模型：`FDnCNN Color FP16`
+  - runtime: NCNN
+  - 输入：`[R, G, B, sigma]` CHW float32，RGB 归一化到 `0..1`，sigma map 为 `sigma / 255`
+  - 输出：denoised RGB CHW float32
+  - allenk blend 逻辑：对 watermark alpha mask 做 Sobel / gamma / dilate / blur 后，只在 ROI 内按权重混合 denoised 输出。
+- 新增模型提取工具：
+  - `scripts/extract-allenk-fdncnn-model.js`
+  - `package.json`
+    - 新增 `pnpm extract:allenk-fdncnn`
+  - `tests/scripts/extractAllenkFdncnnModel.test.js`
+  - 提取 manifest 现在包含 NCNN binary param 解析结果和每层权重偏移：
+    - `21` layers / `21` blobs
+    - `20` convolution layers
+    - `19` ReLU convolution layers
+    - input blob: `0`
+    - output blob: `20`
+    - channels: `4 -> 64 -> 3`
+    - kernel: `3x3`
+    - storage: `fp16-weights-fp32-bias`
+- 新增 allenk 算法合约模块：
+  - `src/core/allenkFdncnnDenoise.js`
+  - `tests/core/allenkFdncnnDenoise.test.js`
+  - 固化内容：
+    - 模型元数据、blob id、默认 sigma / strength / padding
+    - FDnCNN CHW 输入构造：RGB plane + uniform sigma plane
+    - FDnCNN CHW 输出转 RGBA
+    - allenk 风格 alpha gradient mask
+    - padded ROI / inner rect 计算
+    - ROI weight 嵌入 padded 坐标并做 sigma=1 过渡 blur
+    - `result = weight * denoised + (1 - weight) * original` masked blend
+- 新增 NCNN 模型解析模块：
+  - `src/core/allenkFdncnnNcnnModel.js`
+  - `tests/core/allenkFdncnnNcnnModel.test.js`
+  - 能解析 allenk 生成的 binary param，校验每层 convolution 的 `weightDataSize`，并计算 FP16 weights / FP32 bias 在 bin 文件中的字节偏移。
+- 新增 debug/reference runtime：
+  - `src/core/allenkFdncnnReferenceRuntime.js`
+  - `tests/core/allenkFdncnnReferenceRuntime.test.js`
+  - 能在浏览器兼容 JS 中：
+    - 解码 FP16 weights；
+    - 执行 tiny model / tiny ROI 的 same-padding convolution + ReLU；
+    - 通过 MAC 上限 fail-fast，避免误用于真实视频生产尺度；
+    - 暴露 `denoiseImageData()`，供视频 ROI pipeline 注入验证。
+- 新增 browser spike 报告：
+  - `scripts/create-allenk-fdncnn-browser-spike-report.js`
+  - `package.json`
+    - 新增 `pnpm report:allenk-fdncnn-browser-spike`
+  - `tests/scripts/allenkFdncnnBrowserSpikeReport.test.js`
+  - 真实输出：
+    - `.artifacts/allenk-fdncnn/browser-spike-report.json`
+    - `.artifacts/allenk-fdncnn/browser-spike-report.md`
+  - ROI 推理量级：
+    - `72x72`: `3.46G` MAC
+    - `96x96`: `6.15G` MAC
+    - `200x200`: `26.70G` MAC
+  - 报告结论：
+    - 纯 JS 只能做 debug/reference，不适合生产视频处理。
+    - 推荐下一步 spike：`onnxruntime-web-webgpu`
+    - fallback 研究路径：`web-ncnn`
+    - Canvas cleanup 继续保留为 fallback，不再作为 allenk 等价方案。
+  - 本地限制：
+    - `.artifacts/external-repos/GeminiWatermarkTool/external/ncnn/ncnn-20260113-src` 当前未提供可用源码/工具文件。
+    - 因此本轮不能依赖本地 `ncnn2onnx` / ncnn tools 直接转换；已改为项目内最小 ONNX protobuf 写出器做固定 shape 导出。
+- 新增 ONNX 导出原型：
+  - `src/core/allenkFdncnnOnnxExport.js`
+  - `scripts/export-allenk-fdncnn-onnx.js`
+  - `package.json`
+    - 新增 `pnpm export:allenk-fdncnn-onnx`
+  - `tests/core/allenkFdncnnOnnxExport.test.js`
+  - `tests/scripts/allenkFdncnnOnnxExport.test.js`
+  - 导出策略：
+    - 读取已提取的 NCNN binary param / bin；
+    - 按 allenk weight layout 解码 FP16 weights；
+    - bias 保持 FP32；
+    - ONNX initializer 使用 `FLOAT` raw_data，优先兼容 ONNX Runtime Web / WebGPU；
+    - 固定输入 shape：`[1, 4, 72, 72]`；
+    - 固定输出 shape：`[1, 3, 72, 72]`；
+    - graph: `20` Conv + `19` Relu，共 `39` nodes，`40` initializers。
+  - 真实输出：
+    - 命令：`pnpm export:allenk-fdncnn-onnx`
+    - `.artifacts/allenk-fdncnn/model_core_fp32_72.onnx`
+    - `.artifacts/allenk-fdncnn/onnx-manifest.json`
+    - ONNX bytes: `2679703`
+    - ONNX sha256: `c10b07da39b7e99ca385f9d0c30c03f939fe87b2cb8c896570aac4616971d6d8`
+  - browser spike report 更新：
+    - `scripts/create-allenk-fdncnn-browser-spike-report.js` 会读取 `.artifacts/allenk-fdncnn/onnx-manifest.json`；
+    - ONNX 存在时，`onnxruntime-web-webgpu` 状态从 `needs-conversion` 升级为 `prototype-ready`；
+    - runtime smoke 通过后，`onnxruntime-web-webgpu` 状态进一步升级为 `runtime-smoke-passed`；
+    - 这只表示模型资产可交给浏览器运行时 spike，不表示真实视频质量已通过 gate。
+- 新增 ONNX Runtime Web smoke：
+  - dev dependency:
+    - `onnxruntime-web`
+  - `scripts/smoke-allenk-fdncnn-onnx-runtime.js`
+  - `package.json`
+    - 新增 `pnpm smoke:allenk-fdncnn-onnx-runtime`
+  - `tests/scripts/allenkFdncnnOnnxRuntimeSmoke.test.js`
+  - 真实输出：
+    - 命令：`pnpm smoke:allenk-fdncnn-onnx-runtime`
+    - `.artifacts/allenk-fdncnn/onnx-runtime-smoke.json`
+  - 真实 runtime smoke：
+    - execution provider: `wasm`
+    - session input: `fdncnn_input`
+    - session output: `fdncnn_output`
+    - input shape: `[1, 4, 72, 72]`
+    - output shape: `[1, 3, 72, 72]`
+    - output length: `15552`
+    - create: `~198ms`
+    - zero-input inference: `~224ms`
+  - 结论：
+    - 导出的 ONNX 已被 `onnxruntime-web` 实际加载并执行；
+    - WASM 速度只适合作为可执行性基线，真实视频逐帧处理仍需 WebGPU / ROI 调度 / 缓存 session；
+    - 这一步仍未证明视觉质量超过当前 Canvas 方案，后续必须接入真实视频 ROI pipeline 并跑 frame/video gate。
+- 新增 ONNX runtime adapter 与真实 frame gate：
+  - `src/core/allenkFdncnnOnnxRuntime.js`
+  - `tests/core/allenkFdncnnOnnxRuntime.test.js`
+  - `src/video/videoCleanupBackends.js`
+    - 新增 `applyVideoResidualCleanupAsync()`；
+    - `allenk-fdncnn-browser-spike` 后端支持异步 `runtime.denoiseImageData()`；
+    - 支持 `allenkFdncnnPadding`，便于固定 shape ONNX 先以 `padding=0` 跑真实 72px ROI；
+    - runtime 结果记录 `denoiseRuntimeRunMs`。
+  - `scripts/run-video-frame-backend-lab.js`
+    - 支持注入 `allenkFdncnnRuntime` / `allenkFdncnnSigma` / `allenkFdncnnPadding`；
+    - frame lab JSON/Markdown 记录每帧 runtime 状态、MAC、run time。
+  - `scripts/run-allenk-fdncnn-onnx-frame-lab.js`
+  - `package.json`
+    - 新增 `pnpm lab:allenk-fdncnn-onnx-frames`
+  - `tests/scripts/allenkFdncnnOnnxFrameLab.test.js`
+  - 真实 frame lab：
+    - 命令：`pnpm lab:allenk-fdncnn-onnx-frames -- --timestamps "1,3,5" --padding 0 --sigma 75 --strength 0.85`
+    - 输出：
+      - `.artifacts/allenk-fdncnn/onnx-frame-lab/latest-report.json`
+      - `.artifacts/allenk-fdncnn/onnx-frame-lab/latest-report.md`
+      - `.artifacts/allenk-fdncnn/onnx-frame-lab/*-allenk-fdncnn-browser-spike.png`
+    - runtime：`allenk-fdncnn-onnx-wasm`
+    - per-frame MAC：`3460755456`
+    - avg run：
+      - `4d420881`: `~249.3ms`
+      - `deaee69b`: `~252.6ms`
+      - `e1997e6e`: `~264.4ms`
+    - frame lab deltas：
+      - `4d420881`: active `+0.0350` regressed；edge `-0.0462` improved；highBody `+0.0684` regressed。
+      - `deaee69b`: active `-0.0757` improved；edge `-0.2111` improved；highBody `-0.0192` neutral。
+      - `e1997e6e`: active `+0.0060` neutral；edge `-0.4329` improved；highBody `+0.1889` regressed。
+  - 真实 gate：
+    - 命令：`pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/onnx-frame-lab/latest-report.json --output .artifacts/allenk-fdncnn/onnx-frame-lab/gate-report.json --markdown .artifacts/allenk-fdncnn/onnx-frame-lab/gate-report.md`
+    - 输出：
+      - `.artifacts/allenk-fdncnn/onnx-frame-lab/gate-report.json`
+      - `.artifacts/allenk-fdncnn/onnx-frame-lab/gate-report.md`
+    - 决策：`allenk-fdncnn-browser-spike, strength=0.85`: `reject`
+    - 原因：`4d420881` active/highBody material regression，`e1997e6e` highBody material regression。
+  - 结论：
+    - 目标链路已经从 synthetic seam 推进到真实 frame lab + gate；
+    - 当前 ONNX/WASM/padding=0 后端不能 promote；
+    - 下一步优先尝试更贴近 allenk 的 padded ROI，例如导出 `104x104` ONNX 并以 `padding=16` 跑同一 gate，或直接进入 WebGPU provider 性能/质量 smoke。
+- 新增 104x104 padded ROI sweep：
+  - 背景：
+    - `72x72 / padding=0 / strength=0.85` 能执行但 gate `reject`；
+    - allenk 原始流程有 padded ROI 上下文，当前视频水印为 `72px`，按默认 `padding=16` 推导固定模型输入应为 `104x104`。
+  - 104 ONNX 导出：
+    - 命令：`pnpm export:allenk-fdncnn-onnx -- --roi-size 104 --output-dir .artifacts/allenk-fdncnn/roi104`
+    - 输出：
+      - `.artifacts/allenk-fdncnn/roi104/model_core_fp32_104.onnx`
+      - `.artifacts/allenk-fdncnn/roi104/onnx-manifest.json`
+    - ONNX sha256: `cdbea952c0cf864ca9937c25ce6be0553209d9810fb7438201b9fb6109de59b0`
+  - 104 runtime smoke：
+    - 命令：`pnpm smoke:allenk-fdncnn-onnx-runtime -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output .artifacts/allenk-fdncnn/roi104/onnx-runtime-smoke.json`
+    - input shape: `[1, 4, 104, 104]`
+    - output shape: `[1, 3, 104, 104]`
+    - WASM zero-input inference: `~477ms`
+  - 104 / padding=16 / strength sweep：
+    - `strength=0.85`
+      - 命令：`pnpm lab:allenk-fdncnn-onnx-frames -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output-dir .artifacts/allenk-fdncnn/onnx-frame-lab-pad16 --timestamps "1,3,5" --padding 16 --sigma 75 --strength 0.85`
+      - gate：`reject`
+      - active：三例均 improved；
+      - highBody：`4d420881 +0.0272` regressed，`e1997e6e +0.1663` regressed。
+    - `strength=0.65`
+      - 输出：`.artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength065`
+      - gate：`reject`
+      - active：三例均 improved；
+      - highBody：`e1997e6e +0.1256` regressed。
+    - `strength=0.45`
+      - 输出：`.artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength045`
+      - gate：`reject`
+      - active：三例均 improved；
+      - highBody：`e1997e6e +0.0669` regressed。
+    - `strength=0.25`
+      - 命令：`pnpm lab:allenk-fdncnn-onnx-frames -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output-dir .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025 --timestamps "1,3,5" --padding 16 --sigma 75 --strength 0.25`
+      - gate 命令：`pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025/latest-report.json --output .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025/gate-report.json --markdown .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025/gate-report.md`
+      - gate：`promote-default-candidate`
+      - active：
+        - `4d420881`: `-0.0104` neutral
+        - `deaee69b`: `-0.0057` neutral
+        - `e1997e6e`: `-0.0611` improved
+      - edge：
+        - `4d420881`: `-0.0384` improved
+        - `deaee69b`: `-0.0360` improved
+        - `e1997e6e`: `-0.2412` improved
+      - highBody：
+        - `4d420881`: `+0.0012` neutral
+        - `deaee69b`: `+0.0069` neutral
+        - `e1997e6e`: `+0.0139` neutral
+      - runtime avg:
+        - `4d420881`: `~453.2ms`
+        - `deaee69b`: `~456.5ms`
+        - `e1997e6e`: `~461.1ms`
+  - 当前判断：
+    - 104 padded ROI 明显比 72 direct ROI 稳；
+    - 高 strength 会带来 highBody 内容扰动，不能作为默认；
+    - `strength=0.25` 是目前第一个通过现有 frame denoise gate 的 ONNX/WASM allenk FDnCNN 候选；
+    - 仍需视频级导出/性能验证和人工审阅，不应仅凭 3 timestamp frame gate 直接发为 UI 默认。
+- 新增视频级导出与控制复核：
+  - 背景：
+    - 直接调用 `removeGeminiVideoWatermark()` 的 Node 导出脚本在当前环境被 `createRuntimeCanvas()` 阻断，错误为 `当前环境没有可用 Canvas`；这是 Node/WebCodecs 调试路径限制，不代表浏览器路径不可行。
+    - 为先拿到真实视频证据，新增离线帧序列导出：从现有 `gwr-video-mvp` baseline MP4 抽 PNG 帧，逐帧在右下 ROI 上应用 ONNX/WASM FDnCNN cleanup，再用 ffmpeg 封装 MP4。
+  - 新增/更新脚本：
+    - `scripts/export-allenk-fdncnn-onnx-frame-video.js`
+      - 新增 `--crf` / `--preset`，默认 `crf=12`、`preset=slow`，避免未记录的默认编码质量污染指标。
+      - 新增 `--skip-denoise`，用于生成完全相同帧往返管线的 no-op 控制视频。
+    - `scripts/create-allenk-fdncnn-onnx-video-evidence.js`
+      - 根据导出 report 生成 baseline + candidate 的 video benchmark manifest。
+  - `4d420881 / 3s / 72 frames / crf10` 导出：
+    - 命令：`pnpm export:allenk-fdncnn-onnx-frame-video -- --case 4d420881 --duration 3 --crf 10 --preset slow --output-dir .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10`
+    - 输出：
+      - `.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/4d420881-pad16-strength025.mp4`
+      - `.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/4d420881-pad16-strength025-report.json`
+    - runtime：`72` frames applied，平均 `~467.5ms/frame`。
+  - 视频级 gate：
+    - candidate benchmark：
+      - `.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/latest-summary.json`
+    - 直接重编码控制：
+      - `.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/encoding-control-benchmark/latest-summary.json`
+      - 结论：CRF10 direct reencode 近似 neutral，不能解释 candidate 指标回归。
+    - PNG 帧往返控制：
+      - `.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/png-roundtrip-control-benchmark/latest-summary.json`
+      - 结论：仅 `video -> PNG frames -> MP4` 就会造成 active `+0.1372`、edge `+0.1051`、highBody `+0.1504` 的 apparent regression。
+    - 综合控制 gate：
+      - 命令：`pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/latest-summary.json --control-reports '.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/encoding-control-benchmark/latest-summary.json,.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/png-roundtrip-control-benchmark/latest-summary.json' --output .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/gate-with-controls-report.json --markdown .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/gate-with-controls-report.md`
+      - 决策：`insufficient-improvement`
+      - 解释：candidate 的 apparent regressions 被 PNG roundtrip control 覆盖，但视频层没有留下足够正向收益，因此不能 promote。
+  - `1,2` 早段 frame lab 复核：
+    - 命令：`pnpm lab:allenk-fdncnn-onnx-frames -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output-dir .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025-t12 --timestamps "1,2" --padding 16 --sigma 75 --strength 0.25`
+    - gate：`promote-default-candidate`
+    - 结果：
+      - `4d420881`: active `-0.0135` neutral，edge `-0.0492` improved
+      - `deaee69b`: active `-0.0533` improved，edge `-0.1715` improved
+      - `e1997e6e`: active `-0.0398` improved，edge `-0.1464` improved
+  - 更新判断：
+    - allenk FDnCNN ONNX 候选在 PNG 单帧层面是有效的，不是“完全学错”；
+    - 当前视频级瓶颈转为 frame roundtrip / MP4 encode pipeline 对局部 residual 指标的破坏；
+    - 在解决视频封装路径前，不能把 `allenk-fdncnn-browser-spike` 暴露为默认 UI 能力；
+    - 下一步优先级应从继续调 strength 转为：
+      - 让浏览器端原生视频导出路径直接接 async ROI runtime，减少离线 PNG roundtrip 伪影；
+      - 或研究更接近 allenk 的视频编码/帧缓存方式，再重跑同一 video gate。
+- 视频 ROI pipeline 触点：
+  - `src/video/videoCleanupBackends.js`
+    - 新增实验候选后端：`allenk-fdncnn-browser-spike`
+  - 现阶段不暴露到 UI 下拉，不做假 AI 处理。
+  - 当该后端被显式传入时：
+    - normalize 接受该后端；
+    - 未传 runtime 时返回 `denoiseRuntimeStatus=unavailable`，cleanup 阶段 fail-closed/no-op，不读取或写入 canvas；
+    - 传入 `allenkFdncnnRuntime` 时会按 allenk padded ROI / alpha gradient mask / masked blend 调用 `runtime.denoiseImageData()` 并写回 canvas；
+    - 后续 WebGPU/ONNX 或 Web NCNN runtime 应接入这个分支，替代 pure-js reference。
+- 新增 runtime seam 证据：
+  - `scripts/create-allenk-fdncnn-runtime-seam-report.js`
+  - `package.json`
+    - 新增 `pnpm report:allenk-fdncnn-runtime-seam`
+  - `tests/scripts/allenkFdncnnRuntimeSeamReport.test.js`
+  - 真实输出：
+    - `.artifacts/allenk-fdncnn/runtime-seam/latest-report.json`
+    - `.artifacts/allenk-fdncnn/runtime-seam/latest-report.md`
+    - `.artifacts/allenk-fdncnn/runtime-seam/comparison-sheet.png`
+  - 证据性质：
+    - 小型合成 ROI；
+    - 注入 `allenk-fdncnn-runtime-seam-fixture`；
+    - 输出 frame-lab 兼容 report；
+    - 可视 sheet 展示 baseline / allenk runtime seam / reference；
+    - 用于证明 runtime seam 和 ROI pipeline 可运行，不用于证明真实视频默认可用。
+- gate 更新：
+  - `scripts/gate-video-denoise-candidates.js`
+  - `tests/scripts/videoDenoiseCandidateGate.test.js`
+  - 如果证据层标记 `syntheticSeamFixture=true`，候选决策降级为 `synthetic-seam-evidence-only`，避免把合成 seam 误判为 `promote-default-candidate`。
+  - 本轮真实 gate：
+    - 命令：`pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/runtime-seam/latest-report.json --output .artifacts/allenk-fdncnn/runtime-seam/gate-report.json --markdown .artifacts/allenk-fdncnn/runtime-seam/gate-report.md`
+    - 输出：
+      - `.artifacts/allenk-fdncnn/runtime-seam/gate-report.json`
+      - `.artifacts/allenk-fdncnn/runtime-seam/gate-report.md`
+    - 决策：`allenk-fdncnn-browser-spike, strength=1`: `synthetic-seam-evidence-only`
+    - synthetic case 指标：
+      - active meanAbs delta: `-30.0023`
+      - edge meanAbs delta: `-30.0023`
+      - lowBody / highBody: neutral
+- 真实提取结果：
+  - 命令：`pnpm extract:allenk-fdncnn`
+  - 输出：
+    - `.artifacts/allenk-fdncnn/model_core_fp16.param.bin`
+    - `.artifacts/allenk-fdncnn/model_core_fp16.bin`
+    - `.artifacts/allenk-fdncnn/manifest.json`
+  - manifest 记录：
+    - param bytes: `1464`
+    - param sha256: `18a3a214fb25cdf3e68c05656e48f18cb83a0ee5499385caeecb79e591244b0c`
+    - bin bytes: `1340124`
+    - bin sha256: `e4cbf3ee91969c72d1e984a7c10afbf54f4f491cca064a4545ed3b3cb88007f5`
+- 验证：
+  - `pnpm exec node --test tests/scripts/extractAllenkFdncnnModel.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`5` tests passed。
+  - `pnpm exec node --test tests/core/allenkFdncnnDenoise.test.js tests/scripts/extractAllenkFdncnnModel.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`13` tests passed。
+  - `pnpm exec node --test tests/core/allenkFdncnnDenoise.test.js tests/core/allenkFdncnnNcnnModel.test.js tests/scripts/extractAllenkFdncnnModel.test.js tests/scripts/allenkFdncnnBrowserSpikeReport.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`22` tests passed。
+  - `pnpm exec node --test tests/video/videoCleanupBackends.test.js tests/core/allenkFdncnnDenoise.test.js tests/core/allenkFdncnnNcnnModel.test.js tests/scripts/extractAllenkFdncnnModel.test.js tests/scripts/allenkFdncnnBrowserSpikeReport.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`40` tests passed。
+  - `pnpm exec node --test tests/core/allenkFdncnnReferenceRuntime.test.js tests/core/allenkFdncnnDenoise.test.js tests/core/allenkFdncnnNcnnModel.test.js tests/video/videoCleanupBackends.test.js`
+  - 结果：`37` tests passed。
+  - `pnpm exec node --test tests/scripts/videoDenoiseCandidateGate.test.js tests/scripts/allenkFdncnnRuntimeSeamReport.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`10` tests passed。
+  - `pnpm report:allenk-fdncnn-runtime-seam`
+  - 结果：runtime seam frame-lab report 和 comparison sheet 已生成。
+  - `pnpm extract:allenk-fdncnn`
+  - 结果：真实模型 manifest 已重生，包含结构摘要和 `20` 个权重段。
+  - `pnpm report:allenk-fdncnn-browser-spike`
+  - 结果：真实 browser spike report 已生成。
+  - `pnpm exec node --test tests/core/allenkFdncnnOnnxExport.test.js tests/scripts/allenkFdncnnOnnxExport.test.js tests/scripts/allenkFdncnnBrowserSpikeReport.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`11` tests passed。
+  - `pnpm export:allenk-fdncnn-onnx`
+  - 结果：真实 ONNX FP32 72 ROI 模型已生成。
+  - `pnpm smoke:allenk-fdncnn-onnx-runtime`
+  - 结果：`onnxruntime-web` WASM backend 可加载并执行真实 72 ROI ONNX。
+  - `pnpm exec node --test tests/scripts/allenkFdncnnOnnxRuntimeSmoke.test.js tests/scripts/allenkFdncnnOnnxExport.test.js tests/core/allenkFdncnnOnnxExport.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`8` tests passed。
+  - `pnpm exec node --test tests/core/allenkFdncnnOnnxRuntime.test.js tests/video/videoCleanupBackends.test.js tests/scripts/allenkFdncnnOnnxFrameLab.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`25` tests passed。
+  - `pnpm lab:allenk-fdncnn-onnx-frames -- --timestamps "1,3,5" --padding 0 --sigma 75 --strength 0.85`
+  - 结果：真实 ONNX/WASM frame lab 已生成，3 个 baseline case 均成功应用 runtime。
+  - `pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/onnx-frame-lab/latest-report.json --output .artifacts/allenk-fdncnn/onnx-frame-lab/gate-report.json --markdown .artifacts/allenk-fdncnn/onnx-frame-lab/gate-report.md`
+  - 结果：`allenk-fdncnn-browser-spike, strength=0.85` 被 gate `reject`，不允许 promote。
+  - `pnpm export:allenk-fdncnn-onnx -- --roi-size 104 --output-dir .artifacts/allenk-fdncnn/roi104`
+  - 结果：真实 ONNX FP32 104 padded ROI 模型已生成。
+  - `pnpm smoke:allenk-fdncnn-onnx-runtime -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output .artifacts/allenk-fdncnn/roi104/onnx-runtime-smoke.json`
+  - 结果：`onnxruntime-web` WASM backend 可加载并执行真实 104 ROI ONNX。
+  - `pnpm lab:allenk-fdncnn-onnx-frames -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output-dir .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025 --timestamps "1,3,5" --padding 16 --sigma 75 --strength 0.25`
+  - 结果：真实 104/padding16/strength025 frame lab 已生成。
+  - `pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025/latest-report.json --output .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025/gate-report.json --markdown .artifacts/allenk-fdncnn/onnx-frame-lab-pad16-strength025/gate-report.md`
+  - 结果：`allenk-fdncnn-browser-spike, strength=0.25` 通过 frame gate，决策为 `promote-default-candidate`。
+  - `pnpm export:allenk-fdncnn-onnx-frame-video -- --case 4d420881 --duration 3 --crf 10 --preset slow --output-dir .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10`
+  - 结果：`4d420881` 3s/72-frame ONNX/WASM video export 已生成，平均 `~467.5ms/frame`。
+  - `pnpm benchmark:video-crops -- --manifest .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark-manifest.json --output-dir .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark --summary .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/latest-summary.json`
+  - 结果：candidate video benchmark 已生成。
+  - `pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/latest-summary.json --control-reports '.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/encoding-control-benchmark/latest-summary.json,.artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/png-roundtrip-control-benchmark/latest-summary.json' --output .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/gate-with-controls-report.json --markdown .artifacts/allenk-fdncnn/video-frame-export-4d420881-pad16-strength025-crf10/benchmark/gate-with-controls-report.md`
+  - 结果：视频级决策为 `insufficient-improvement`，不允许默认启用。
+  - `pnpm exec node --test tests/scripts/allenkFdncnnOnnxFrameVideoExport.test.js tests/scripts/scriptEntrypoints.test.js tests/video/videoCleanupBackends.test.js tests/core/allenkFdncnnOnnxRuntime.test.js`
+  - 结果：`25` tests passed。
+  - `pnpm build`
+  - 结果：build passed。
+- 更新判断：
+  - “直接学习 allenk”在工程上应拆成两层：
+    - 算法层：复刻 ROI mask 构造、FDnCNN 输入输出、sigma / strength / padding / blend 策略。
+    - 运行时层：已生成固定 72 ROI 和 104 padded ROI ONNX FP32 资产，并用 `onnxruntime-web` WASM 完成可执行性 smoke；已接入 async video ROI pipeline 并产生真实 frame gate。当前 frame 级可通过 gate 的候选是 `104x104 / padding=16 / strength=0.25`。
+  - 不应继续把纯 Canvas 去噪伪装成 allenk 等价能力；它只能保留为 fallback。
+  - 视频级复核后，该候选暂定为 `insufficient-improvement`：算法在单帧 ROI 上有效，但当前离线帧往返导出会吞掉收益；下一步应优先修浏览器视频导出接入 async ROI runtime / 编码链路，而不是继续微调 FDnCNN strength。
+
+### 2026-06-12 浏览器端 AI 后端接入 smoke
+
+- 目标：
+  - 把已导出的 `104x104 / padding=16 / strength=0.25` allenk FDnCNN ONNX 候选接到真实 `video-preview.html` 导出流程；
+  - 先作为高级/调试后端可选，不默认启用；
+  - 验证页面上传视频后能在浏览器内懒加载模型、逐帧处理并导出 MP4。
+- 代码接入：
+  - `src/core/allenkFdncnnOnnxRuntime.js`
+    - runtime import 改为 `onnxruntime-web/wasm`；
+    - 支持传入 `wasmPaths`，浏览器端固定走 WASM EP；
+    - `numThreads` 默认 `1`，`proxy=false`，避免调试页 worker/proxy 复杂性。
+  - `src/video-app.js`
+    - 新增模型路径：`./models/allenk-fdncnn/model_core_fp32_104.onnx`；
+    - 新增 WASM runtime 路径：`./onnxruntime/ort-wasm-simd-threaded.js` / `.wasm`；
+    - 导出时如果选择 `allenk-fdncnn-browser-spike`：
+      - 保留用户手选的调试后端，不被自动 preset 覆盖；
+      - 自动设置 `edgeDenoiseStrength=0.25`；
+      - 懒加载 ONNX runtime；
+      - 向 `removeGeminiVideoWatermark()` 传入 `allenkFdncnnRuntime`、`allenkFdncnnSigma=75`、`allenkFdncnnPadding=16`。
+  - `public/video-preview.html`
+    - 后端去噪下拉新增 `AI FDnCNN ONNX（调试）`。
+  - `build.js`
+    - 静态服务 MIME 增加 `.mjs`、`.onnx`、`.wasm`。
+- 新增静态资产：
+  - `public/models/allenk-fdncnn/model_core_fp32_104.onnx`
+    - bytes: `2679703`
+  - `public/onnxruntime/ort-wasm-simd-threaded.js`
+    - bytes: `24180`
+  - `public/onnxruntime/ort-wasm-simd-threaded.mjs`
+    - bytes: `24180`
+  - `public/onnxruntime/ort-wasm-simd-threaded.wasm`
+    - bytes: `13022405`
+- 验证：
+  - 单元/脚本：
+    - `pnpm exec node --test tests/core/allenkFdncnnOnnxRuntime.test.js tests/video/videoCleanupBackends.test.js tests/scripts/scriptEntrypoints.test.js`
+    - 结果：`24` tests passed。
+  - 构建：
+    - `pnpm build`
+    - 结果：build passed。
+  - 页面静态资源：
+    - `http://127.0.0.1:4173/video-preview.html` 可访问；
+    - 调试下拉存在 `AI FDnCNN ONNX（调试）`；
+    - ONNX 模型 fetch 成功，bytes `2679703`。
+  - 浏览器真实导出 smoke：
+    - 输入：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-025s-source.mp4`
+      - 从 `D:\Project\sample-files\gemini-video-watermark\4d420881-c144-497f-9a6e-43beda086580.mp4` 截取 `0.25s`。
+    - 页面参数：
+      - `sampleCount=4`
+      - `allowLowConfidence=true`
+      - `denoiseBackend=allenk-fdncnn-browser-spike`
+      - `edgeDenoiseStrength=0.25`
+    - 页面结果：
+      - `导出完成，已处理 6 帧，后端去噪：allenk-fdncnn-browser-spike。音频未保留：no-audio-track。`
+    - 导出：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-025s-after.mp4`
+    - 对比视频：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-025s-compare.mp4`
+    - 对比首帧：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-025s-compare.png`
+  - 浏览器真实导出 1s smoke：
+    - 输入：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-1s-source.mp4`
+    - 页面结果：
+      - `导出完成，已处理 24 帧，后端去噪：allenk-fdncnn-browser-spike。音频未保留：no-audio-track。`
+    - 导出：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-1s-after.mp4`
+      - bytes: `750231`
+    - 对比视频：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-1s-compare.mp4`
+    - 对比首帧：
+      - `.artifacts/allenk-fdncnn/browser-ai-smoke-1s-compare.png`
+    - 视觉结论：
+      - 星形水印主体明显被压低；
+      - 残留主要转为暗部轻微块状/纹理扰动；
+      - 已足够用于页面调试和人工复核，但仍需要多样本 browser-native gate 才能默认启用。
+- 已知小问题：
+  - 当前 VS Code 中已启动的本地 dev server 可能还没吃到 `build.js` 的新 MIME 表；
+  - 在旧 server 上 `.wasm` 会触发一次 `wasm streaming compile failed ... Incorrect response MIME type`，随后 `onnxruntime-web` 会 fallback 到 ArrayBuffer 实例化，实测仍可成功导出；
+  - 重启本地 dev server 后应使用新的 `.wasm = application/wasm` MIME，消除该 warning。
+- 当前判断：
+  - 浏览器端 AI 后端已经从“脚本验证”推进到“页面可试用”；
+  - 0.25s smoke 的右下角 ROI 视觉上能明显压掉 Gemini 星形水印主体；
+  - 仍不默认启用，原因是此前视频级 gate 仍为 `insufficient-improvement`，需要更多浏览器原生导出样本验证稳定收益；
+  - 下一步应做更长片段 / 多样本 browser-native gate，而不是继续只看离线 PNG roundtrip。
+
+### 2026-06-12 产品化调整：默认 AI，隐藏内部参数
+
+- 用户判断：
+  - 先保证可用；
+  - 默认就开启 AI 方案；
+  - 调试页不需要展示 Alpha、后端、去噪强度、抽帧数等内部参数。
+- 本轮调整：
+  - `src/video/videoPresetPolicy.js`
+    - `standard-auto` 默认改为 `allenk-fdncnn-browser-spike`；
+    - `edgeDenoiseStrength` 固定为 `0.25`；
+    - 迁移锚点检测也保留在 AI 路径，不再自动切回 Canvas 时序匹配；
+    - 文案统一为 `AI 自动处理`。
+  - `public/video-preview.html`
+    - 移除可见的 `高级参数` 面板；
+    - Alpha / 自适应 Alpha / 实验边缘去噪 / 后端去噪 / 迁移锚点按钮 / 边缘强度 / 边缘软清理 / 抽帧数 / 码率 / 允许低置信等控件改为隐藏内部控件；
+    - 可见主流程只保留选择文件、检测、重置、自动导出、下载、视频信息、检测结果。
+  - `src/video-app.js`
+    - 初始化时直接套用 `getAutomaticVideoPresetConfig()`，页面默认值即 AI 后端；
+    - 导出完成文案改为 `AI 去水印已完成`，不暴露 `allenk-fdncnn-browser-spike` 工程名；
+    - 选择/自动套 preset 时不再弹出调试后端提示。
+- 验证：
+  - `pnpm exec node --test tests/video/videoPresetPolicy.test.js tests/video/videoCleanupBackends.test.js tests/core/allenkFdncnnOnnxRuntime.test.js tests/scripts/scriptEntrypoints.test.js`
+  - 结果：`29` tests passed。
+  - `pnpm build`
+  - 结果：build passed。
+  - 浏览器 UI smoke：
+    - 页面可见文本不再包含 `高级参数` / `后端去噪`；
+    - 默认隐藏值：
+      - `denoiseBackend = allenk-fdncnn-browser-spike`
+      - `edgeDenoiseStrength = 0.25`
+  - 浏览器默认导出 smoke：
+    - 不手动选择任何参数；
+    - 输入 `.artifacts/allenk-fdncnn/browser-ai-smoke-025s-source.mp4`；
+    - 输出状态：`AI 去水印已完成，已处理 6 帧。音频未保留：no-audio-track。`
+    - 下载按钮可用。
+
+### 2026-06-12 allenk 学习深化：AI 先行，残影收尾
+
+- 背景：
+  - 用户要求充分学习 allenk，不只是把 AI 后端设为默认。
+  - 本轮重新对照现有 allenk ONNX 实验脚本，发现离线 frame/video 导出都是 `residualCleanupStrength=0`，即模型路径本身不依赖旧的前置 soft cleanup。
+- 实验结论：
+  - 浏览器默认导出改成纯 AI-only 后：
+    - 输出：`.artifacts/allenk-fdncnn/browser-ai-only-default-1s-after.mp4`
+    - 对比：`.artifacts/allenk-fdncnn/browser-ai-only-default-1s-compare.mp4`
+    - 视觉问题：保留了更多纹理，但水印星形轮廓明显回归。
+  - 因此不能简单删除 residual cleanup。
+  - 更合理的 allenk 学习方向是：
+    - 先执行 FDnCNN ONNX；
+    - 再用 mask 约束的 residual cleanup 只做残影收尾；
+    - 避免旧流程里“先 soft cleanup 糊一遍，再让 AI 接手”的顺序。
+- 代码调整：
+  - `src/video/videoCleanupBackends.js`
+    - 对 `allenk-fdncnn-browser-spike` 特殊处理 cleanup 顺序；
+    - 同步 / 异步路径都改成：
+      - `applyAllenkFdncnnRuntime(...)`
+      - 然后 `applySoftResidualCleanup(...)`
+    - 非 AI 后端仍保持旧顺序，避免影响 Canvas 实验后端。
+  - `tests/video/videoCleanupBackends.test.js`
+    - 新增顺序测试：
+      - `get-ai-roi`
+      - `runtime`
+      - `put-ai-roi`
+      - `get-polish-roi`
+      - `put-polish-roi`
+  - `src/video/videoPresetPolicy.js`
+    - 默认仍保留 `residualCleanupStrength=1.5`，但现在它是 AI 后的残影收尾，不再是前置糊化。
+- 新 browser-native 证据：
+  - 默认导出：
+    - `.artifacts/allenk-fdncnn/browser-ai-postpolish-default-1s-after.mp4`
+    - status：`AI 去水印已完成，已处理 24 帧。音频未保留：no-audio-track。`
+  - 四列对比：
+    - `.artifacts/allenk-fdncnn/browser-ai-postpolish-default-1s-compare.mp4`
+    - `.artifacts/allenk-fdncnn/browser-ai-postpolish-default-1s-compare.png`
+  - 视觉判断：
+    - `ai-only` 轮廓明显，不适合作为默认；
+    - `ai-post-polish` 压住轮廓，同时保留了“AI 先处理”的更合理流水线；
+    - 后续如果继续学习 allenk，应优化 AI blend/mask，而不是回到先糊后 AI。
+- 验证：
+  - `pnpm exec node --test tests/video/videoCleanupBackends.test.js tests/video/videoPresetPolicy.test.js tests/core/allenkFdncnnOnnxRuntime.test.js`
+  - 结果：`29` tests passed。
+
+### 2026-06-12 allenk 学习深化：FDnCNN blend 覆盖 alpha footprint
+
+- allenk 日志线索：
+  - `NcnnDenoiser: sigma=75, strength=180%, roi=200x200, 5184 edge pixels`
+  - `5184 = 72 * 72`
+  - 这说明 allenk 的 denoise 有效像素覆盖整个 72px 水印 footprint，而不是只处理窄边线。
+- 当前差距：
+  - 旧 `createAllenkGradientMask()` 主要是 alpha gradient 边缘权重；
+  - 即使接入 FDnCNN，模型也只在边缘附近参与混合；
+  - 这会让 AI 后端过度依赖后续 polish 来压掉主体残影。
+- 本轮调整：
+  - `src/core/allenkFdncnnDenoise.js`
+    - `createAllenkGradientMask()` 保留边缘优先；
+    - 新增 alpha footprint 低权重覆盖：
+      - `footprintStrength = 0.65`
+      - `footprintGamma = 0.65`
+    - 最终权重为 `max(edgeWeight, footprintWeight)`；
+    - 保持默认 `strength=0.25` 时，边缘仍更强，主体内部也有非零 AI blend。
+  - `tests/core/allenkFdncnnDenoise.test.js`
+    - 新增断言：alpha footprint 中心必须有非零权重；
+    - 仍保持 edge weight 大于 center weight。
+- browser-native 证据：
+  - 默认导出：
+    - `.artifacts/allenk-fdncnn/browser-ai-footprint-mask-1s-after.mp4`
+    - status：`AI 去水印已完成，已处理 24 帧。音频未保留：no-audio-track。`
+  - 对比：
+    - `.artifacts/allenk-fdncnn/browser-ai-footprint-mask-1s-compare.mp4`
+    - `.artifacts/allenk-fdncnn/browser-ai-footprint-mask-1s-compare.png`
+  - 视觉判断：
+    - 没有复现 `ai-only` 的明显星形轮廓回归；
+    - 相比上一版 `post-polish`，暗部中心残影略更平顺；
+    - 可保留为默认 AI blend 改进。
+- frame lab / gate：
+  - 命令：
+    - `pnpm lab:allenk-fdncnn-onnx-frames -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output-dir .artifacts/allenk-fdncnn/onnx-frame-lab-footprint-mask-t12 --timestamps "1,2" --padding 16 --sigma 75 --strength 0.25`
+  - 结果：
+    - `4d420881`: active `-0.0296` improved，edge `-0.0492` improved，highBody `-0.0215` improved
+    - `deaee69b`: active `-0.0890` improved，edge `-0.1715` improved，highBody `-0.0546` improved
+    - `e1997e6e`: active `-0.0608` improved，edge `-0.1464` improved，highBody `-0.0251` improved
+  - gate：
+    - `pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/onnx-frame-lab-footprint-mask-t12/latest-report.json --output .artifacts/allenk-fdncnn/onnx-frame-lab-footprint-mask-t12/gate-report.json --markdown .artifacts/allenk-fdncnn/onnx-frame-lab-footprint-mask-t12/gate-report.md`
+    - 决策：`allenk-fdncnn-browser-spike, strength=0.25` -> `promote-default-candidate`
+    - improved cases: `3`
+    - material fail layers: `0`
+
+### 2026-06-12 allenk 学习深化：ROI 200 与纹理保留
+
+- ROI 200 对齐实验：
+  - allenk 日志显示 `roi=200x200`；
+  - 本轮导出固定 shape ONNX：
+    - `pnpm export:allenk-fdncnn-onnx -- --roi-size 200 --output-dir .artifacts/allenk-fdncnn/roi200`
+    - 输出：`.artifacts/allenk-fdncnn/roi200/model_core_fp32_200.onnx`
+    - bytes: `2679707`
+  - WASM smoke：
+    - `pnpm smoke:allenk-fdncnn-onnx-runtime -- --manifest .artifacts/allenk-fdncnn/roi200/onnx-manifest.json --output .artifacts/allenk-fdncnn/roi200/onnx-runtime-smoke.json`
+    - shape：`[1,4,200,200] -> [1,3,200,200]`
+    - run：`~1754.9ms/frame`
+  - 全帧 1s 导出：
+    - `pnpm export:allenk-fdncnn-onnx-frame-video -- --manifest .artifacts/allenk-fdncnn/roi200/onnx-manifest.json --case 4d420881 --duration 1 --padding 64 --sigma 75 --strength 0.25 --crf 12 --preset medium --output-dir .artifacts/allenk-fdncnn/video-frame-export-4d420881-roi200-pad64-strength025-1s`
+    - frames：`24`
+    - avg runtime：`~1754.7ms/frame`
+  - 对比：
+    - `.artifacts/allenk-fdncnn/roi104-vs-roi200-vs-allenk-1s-compare.mp4`
+    - `.artifacts/allenk-fdncnn/roi104-vs-roi200-vs-allenk-1s-compare.png`
+  - 判断：
+    - ROI 200 更贴近 allenk 的输入上下文；
+    - 但 WASM 性能约为 ROI 104 的 `3.8x` 慢；
+    - 1s 视觉没有肉眼级超越 ROI 104；
+    - 暂不进入浏览器默认，保留为高质量/未来 WebGPU 候选。
+- 纹理保留实验：
+  - 观察：
+    - allenk 参考更能保留皮革/塑料颗粒；
+    - 我们的 104/200 AI 输出仍偏平滑暗斑。
+  - 本轮调整：
+    - `src/core/allenkFdncnnDenoise.js`
+      - `blendAllenkDenoisedRoi()` 新增可选局部 highpass 保留；
+      - 使用原始 ROI 的 `3x3` 局部高频；
+      - 单通道 highpass 限制在 `[-14,14]`；
+      - 视频 AI path 使用 `preserveHighpassStrength=0.32`；
+      - 目标是轻微恢复材质颗粒，不重引入水印轮廓。
+    - `tests/core/allenkFdncnnDenoise.test.js`
+      - 新增 highpass texture preserve 单测。
+  - browser-native 证据：
+    - 默认导出：
+      - `.artifacts/allenk-fdncnn/browser-ai-texture-preserve-1s-after.mp4`
+    - 对比：
+      - `.artifacts/allenk-fdncnn/browser-ai-texture-preserve-1s-compare.mp4`
+      - `.artifacts/allenk-fdncnn/browser-ai-texture-preserve-1s-compare.png`
+  - frame lab：
+    - `pnpm lab:allenk-fdncnn-onnx-frames -- --manifest .artifacts/allenk-fdncnn/roi104/onnx-manifest.json --output-dir .artifacts/allenk-fdncnn/onnx-frame-lab-texture-preserve-t12 --timestamps "1,2" --padding 16 --sigma 75 --strength 0.25`
+    - `4d420881`: active `-0.0291` improved，edge `-0.0470` improved
+    - `deaee69b`: active `-0.0918` improved，edge `-0.1723` improved
+    - `e1997e6e`: active `-0.0569` improved，edge `-0.1407` improved
+  - gate：
+    - `pnpm gate:video-denoise -- --reports .artifacts/allenk-fdncnn/onnx-frame-lab-texture-preserve-t12/latest-report.json --output .artifacts/allenk-fdncnn/onnx-frame-lab-texture-preserve-t12/gate-report.json --markdown .artifacts/allenk-fdncnn/onnx-frame-lab-texture-preserve-t12/gate-report.md`
+    - 决策：`promote-default-candidate`
+    - improved cases：`3`
+    - material fail layers：`0`
+  - 判断：
+    - highpass 回灌没有带回明显星形轮廓；
+    - 对纹理自然度是细微补偿，不是决定性跃迁；
+    - 保留，但后续仍要继续寻找更接近 allenk 的纹理建模或 WebGPU 路径。
+
+### 2026-06-12 browser-native 默认 AI 三样本验证与结构保护 v2
+
+- 背景：
+  - 用户反馈默认 AI 方案仍能看到明显水印/残影；
+  - 本轮目标不是继续暴露更多参数，而是保持“默认自动处理”前提下，缩小与 allenk 的视觉差距。
+- browser-native 默认导出基线：
+  - 页面：`http://127.0.0.1:4173/video-preview.html`
+  - 输入 1s 样本：
+    - `.artifacts/browser-native-default-gate/4d420881-source-1s.mp4`
+    - `.artifacts/browser-native-default-gate/deaee69b-source-1s.mp4`
+    - `.artifacts/browser-native-default-gate/e1997e6e-source-1s.mp4`
+  - 默认 AI 输出：
+    - `.artifacts/browser-native-default-gate/4d420881-default-ai-after-1s.mp4`
+    - `.artifacts/browser-native-default-gate/deaee69b-default-ai-after-1s.mp4`
+    - `.artifacts/browser-native-default-gate/e1997e6e-default-ai-after-1s.mp4`
+  - 观察：
+    - `4d420881` / `deaee69b`：水印主体基本压下去，仍比 allenk 更平滑；
+    - `e1997e6e`：斜向亮边区域有灰雾/抹脏，说明 AI 后的 residual cleanup 会误伤真实结构。
+- 本轮代码调整：
+  - `src/video/videoCleanupBackends.js`
+    - 新增 `buildLumaStructureGuard()`，从当前 ROI 亮度 Sobel 梯度构建真实结构保护权重；
+    - 仅在 allenk FDnCNN AI 后置 residual cleanup 中启用；
+    - v1 直接保护强结构，导致 `4d420881` / `deaee69b` 的菱形水印边缘也被保护，出现轮廓回归；
+    - v2 加入 alpha 模板边缘退让：
+      - cleanup 权重越像水印模板边缘，结构保护越弱；
+      - 与水印模板不一致的真实斜线/高光边缘才继续保护。
+  - `scripts/export-video-backend-variant.js`
+    - 兼容隐藏高级控件；
+    - `--page` 支持直接传 HTTP URL，避免 `file://dist` 下 ONNX/WASM fetch 失败。
+  - `tests/video/videoCleanupBackends.test.js`
+    - 新增 `buildLumaStructureGuard should protect strong image edges`。
+- v2 browser-native 证据：
+  - 输出：
+    - `.artifacts/browser-native-default-gate/4d420881-structure-guard-v2-after-1s.mp4`
+    - `.artifacts/browser-native-default-gate/deaee69b-structure-guard-v2-after-1s.mp4`
+    - `.artifacts/browser-native-default-gate/e1997e6e-structure-guard-v2-after-1s.mp4`
+  - 对比图：
+    - `.artifacts/browser-native-default-gate/4d420881-source-old-guard-v2-allenk-compare.png`
+    - `.artifacts/browser-native-default-gate/deaee69b-source-old-guard-v2-allenk-compare.png`
+    - `.artifacts/browser-native-default-gate/e1997e6e-source-old-guard-v2-allenk-compare.png`
+  - 对比视频：
+    - `.artifacts/browser-native-default-gate/4d420881-source-old-guard-v2-allenk-compare.mp4`
+    - `.artifacts/browser-native-default-gate/deaee69b-source-old-guard-v2-allenk-compare.mp4`
+    - `.artifacts/browser-native-default-gate/e1997e6e-source-old-guard-v2-allenk-compare.mp4`
+- 视觉结论：
+  - `4d420881`：v2 没有复现 v1 的菱形轮廓回归，整体与旧默认接近；
+  - `deaee69b`：v2 没有明显新增轮廓，轮胎/轮毂区域保持可用；
+  - `e1997e6e`：v2 仍未完全追平 allenk，但旧默认的灰雾和亮边污染有所减轻；
+  - 结构保护 v2 可保留为默认 AI 后处理改进。
+- 验证：
+  - `pnpm exec node --test tests/video/videoCleanupBackends.test.js tests/core/allenkFdncnnDenoise.test.js tests/video/videoPresetPolicy.test.js tests/core/allenkFdncnnOnnxRuntime.test.js tests/scripts/scriptEntrypoints.test.js`
+    - `40` tests passed
+  - `pnpm build`
+    - passed
+
+## 2026-06-12 alpha profile 与动态 alpha 复核
+
+- 新增 `--alpha-profile` 调试入口，可从 `pnpm export:video-backend` 透传到浏览器页的检测与导出流程；默认仍保持 `96-20260520`，避免把未经验证的 alpha profile 生产化。
+- 试验 `alphaProfile=96 + ROI200 + allenk FDnCNN` 后，右下 ROI 视觉残影没有改善；相对 allenk 的 residual 指标明显变差：active RMS 约 `4.2194`，而默认 ROI200 相对 allenk 的 active RMS 约 `0.0006`。
+- 试验 `adaptive-alpha + ROI200 + allenk FDnCNN` 后，视觉结果与固定 seed 版本基本一致，说明当前差距不主要来自 per-frame seed scale。
+- 复核 allenk 源码的通道顺序与归一化：BGR ROI -> RGB float `[0,1]` -> `[R,G,B,sigma/255]` CHW -> RGB output -> BGR uint8。浏览器 ONNX 路径的 RGBA -> `[R,G,B,sigma/255]` 与其一致，未发现明显通道错配。
+- 当前判断：不要把 `96` profile 或 adaptive alpha 升为默认。下一步更值得做的是扩大样片覆盖，检查用户当前页面是否确实加载了最新 `dist`/200x200 模型，以及把“默认 ROI200 vs allenk”作为主要验收对照。
+
+Artifacts:
+
+- `.artifacts/browser-native-default-gate/4d420881-ai-roi200-alpha96-after-1s.mp4`
+- `.artifacts/browser-native-default-gate/4d420881-ai-roi200-adaptive-after-1s.mp4`
+- `.artifacts/browser-native-default-gate/4d420881-roi200-alpha96-allenk-compare.png`
+- `.artifacts/browser-native-default-gate/4d420881-roi200-adaptive-alpha96-allenk-compare.png`
+- `.artifacts/browser-native-default-gate/4d420881-roi200-vs-allenk-residual.json`
+- `.artifacts/browser-native-default-gate/4d420881-alpha96-vs-allenk-residual.json`
+
+## 2026-06-12 ROI200 后置 cleanup 0.4 复核
+
+- 触发原因：
+  - `alphaProfile=96` 和 `adaptive-alpha` 均未带来收益；
+  - `e1997e6e` 在 `ROI200 + residualCleanup=0` 下仍有轻微暗部残点；
+  - 之前 `0.8` / `1.5` 强度容易过软或误伤结构，因此改试更温和的 `0.4`。
+- 本轮输出：
+  - `.artifacts/browser-native-default-gate/4d420881-ai-roi200-cleanup040-after-1s.mp4`
+  - `.artifacts/browser-native-default-gate/deaee69b-ai-roi200-cleanup040-after-1s.mp4`
+  - `.artifacts/browser-native-default-gate/e1997e6e-ai-roi200-cleanup040-after-1s.mp4`
+- 对比证据：
+  - `.artifacts/browser-native-default-gate/4d420881-roi200-cleanup040-allenk-compare.png`
+  - `.artifacts/browser-native-default-gate/deaee69b-roi200-cleanup040-compare.png`
+  - `.artifacts/browser-native-default-gate/e1997e6e-roi200-cleanup040-compare.png`
+- 视觉判断：
+  - `4d420881`：`cleanup=0.4` 比 `0` 略接近 allenk，未出现明显新污点；
+  - `deaee69b`：与 `0` 基本接近，没有明显轮胎/轮毂结构回退；
+  - `e1997e6e`：暗部残点略有改善，亮边没有恢复到早期强 cleanup 的明显抹脏。
+- 代码调整：
+  - `src/video/videoPresetPolicy.js`
+    - 默认 AI 自动预设的 `residualCleanupStrength` 从 `0` 调整为 `0.4`；
+    - 继续保留 `allenk-fdncnn-browser-spike`、`edgeDenoiseStrength=1.8`、`ROI200` 模型路线。
+  - `src/video-app.js`
+    - 修复隐藏高级 range 控件初始化时 label 不同步的问题；
+    - 修复 `edgeDenoiseStrength=1.8` 被旧 `max=1` range 夹成 `1.0` 的问题，真实页面默认现在会扩展 max 并应用 `1.8`。
+- 当前判断：
+  - `0.4` 是比 `0` 更稳的默认候选；
+  - 它不是完美追平 allenk，但在三条样片上比继续调 alpha 更有实际收益；
+  - 下一步应围绕“确认用户页面实际加载最新 dist + 增加多样片 ROI 审核”收尾，而不是继续扩大参数面板。
+- 验证：
+  - `pnpm exec node --test tests/video/videoPresetPolicy.test.js tests/video/videoCleanupBackends.test.js tests/video/videoWatermarkDetector.test.js`
+    - `38` tests passed
+  - `pnpm build`
+    - passed
+  - Playwright 复查 `http://127.0.0.1:4173/video-preview.html`
+    - `denoiseBackend=allenk-fdncnn-browser-spike`
+    - `edgeDenoiseStrength=1.8`
+    - `residualCleanup=0.4`
+    - `controlsHidden=true`
+    - active JS contains `model_core_fp32_200.onnx`, `1,4,200,200`, `allenkFdncnnPadding:64`
+
+## 2026-06-12 视频 AI 路径性能复核
+
+- 触发原因：
+  - 用户反馈 `ROI200 + allenk FDnCNN` 效果明显变好，但导出速度太慢。
+- 浏览器实测环境：
+  - URL：`http://localhost:4173/video-preview.html`
+  - 样片：`.artifacts/browser-native-default-gate/4d420881-source-1s.mp4`
+  - 当前服务环境：
+    - `navigator.gpu = true`
+    - `crossOriginIsolated = false`
+    - `SharedArrayBuffer = false`
+    - `./onnxruntime/ort-wasm-simd-threaded.jsep.mjs` 被服务为 `application/octet-stream`
+    - `.wasm` 也未按 `application/wasm` 服务，浏览器只能走 ArrayBuffer fallback
+- 性能结论：
+  - 真正瓶颈是每帧 `200x200` FDnCNN ONNX 推理；
+  - WebGPU 已接入但被当前静态服务 MIME 阻断；
+  - WASM threads 需要 COOP/COEP，当前页面未满足。
+- 代码调整：
+  - `src/core/allenkFdncnnOnnxRuntime.js`
+    - 修复 WebGPU 失败后 WASM fallback 执行时仍引用空 `ort` 参数的问题；
+    - WebGPU runtime 改为必须显式注入，避免失败路径污染默认 WASM。
+  - `src/video-app.js`
+    - WebGPU runtime 加入 `.mjs` MIME 预检；
+    - 默认先尝试 WebGPU，不满足时安全降级 WASM；
+    - 慢速 WASM 下自动启用相邻帧 AI 结果复用，不暴露为普通用户配置。
+  - `src/video/videoCleanupBackends.js` / `src/video/videoExport.js`
+    - 增加 FDnCNN 相邻帧 ROI 变化检测；
+    - ROI 亮度变化低于阈值时复用上一帧 AI 输出，变化大时重新推理；
+    - 导出进度与完成状态显示 `AI 推理 N 帧，复用 M 帧`。
+  - `build.js`
+    - 开发静态服务补齐 `.mjs`、`.wasm` MIME；
+    - 为项目 dev server 增加 COOP/COEP/CORP 响应头，以便后续 WebGPU/JSEP 和 WASM threads 正常工作。
+- 实测结果：
+  - 修复前慢速路径：`1s / 24 帧` 样片约 `90s`。
+  - 相邻帧复用后，在同一个仍未启用 WebGPU 的服务环境下：
+    - 耗时约 `20.6s`
+    - `AI 推理 8 帧，复用 16 帧`
+    - 输出：`.artifacts/browser-speed-reuse/4d420881-ai-reuse.mp4`
+    - 报告：`.artifacts/browser-speed-reuse/latest-benchmark.json`
+- 下一步：
+  - 需要让实际调试服务重新加载当前 `build.js` 静态服务配置，确保 `.mjs` / `.wasm` MIME 和 COOP/COEP 生效；
+  - WebGPU 启动后应重新测同一条 1 秒样片，目标是优先恢复逐帧 AI，同时把耗时压到可交互范围。

@@ -23,8 +23,20 @@ import {
     pickDebugUploadFile,
     saveDebugFileHandoff
 } from './shared/debugFileHandoff.js';
+import { createAllenkFdncnnOnnxRuntime } from './core/allenkFdncnnOnnxRuntime.js';
 
 const $ = (id) => document.getElementById(id);
+const ALLENK_FDNCNN_MODEL_URL = './models/allenk-fdncnn/model_core_fp32_200.onnx';
+const ALLENK_FDNCNN_WASM_PATHS = Object.freeze({
+    mjs: './onnxruntime/ort-wasm-simd-threaded.js',
+    wasm: './onnxruntime/ort-wasm-simd-threaded.wasm'
+});
+const ALLENK_FDNCNN_WEBGPU_WASM_PATHS = Object.freeze({
+    mjs: './onnxruntime/ort-wasm-simd-threaded.jsep.mjs',
+    wasm: './onnxruntime/ort-wasm-simd-threaded.jsep.wasm'
+});
+const ALLENK_FDNCNN_INPUT_SHAPE = Object.freeze([1, 4, 200, 200]);
+const ALLENK_FDNCNN_OUTPUT_SHAPE = Object.freeze([1, 3, 200, 200]);
 
 const state = {
     file: null,
@@ -36,6 +48,8 @@ const state = {
     jobId: 0,
     syncingPlayback: false
 };
+
+let allenkFdncnnRuntimePromise = null;
 
 const els = {
     dropzone: $('dropzone'),
@@ -77,6 +91,104 @@ const els = {
 function setStatus(message, tone = 'info') {
     els.status.textContent = message || '';
     els.status.dataset.tone = tone;
+}
+
+function isLikelyJavascriptMime(contentType) {
+    const mime = String(contentType || '').split(';')[0].trim().toLowerCase();
+    return mime === 'application/javascript'
+        || mime === 'text/javascript'
+        || mime === 'application/ecmascript'
+        || mime === 'text/ecmascript'
+        || mime.endsWith('+javascript');
+}
+
+async function preflightWebGpuRuntimeAssets(paths) {
+    try {
+        const response = await fetch(paths.mjs, { cache: 'no-store' });
+        if (!response.ok) {
+            return {
+                ok: false,
+                reason: `WebGPU runtime module unavailable: ${response.status}`
+            };
+        }
+        const contentType = response.headers.get('content-type') || '';
+        if (!isLikelyJavascriptMime(contentType)) {
+            return {
+                ok: false,
+                reason: `WebGPU runtime module is served as ${contentType || 'unknown MIME'}`
+            };
+        }
+        return { ok: true };
+    } catch (error) {
+        return {
+            ok: false,
+            reason: error?.message || String(error)
+        };
+    }
+}
+
+async function loadAllenkFdncnnRuntime() {
+    if (!allenkFdncnnRuntimePromise) {
+        allenkFdncnnRuntimePromise = (async () => {
+            const response = await fetch(ALLENK_FDNCNN_MODEL_URL);
+            if (!response.ok) {
+                throw new Error(`无法加载 AI 模型：${response.status}`);
+            }
+            const modelBytes = new Uint8Array(await response.arrayBuffer());
+            if (navigator.gpu && window.__gwrDisableWebGpuDenoise !== true) {
+                try {
+                    const preflight = await preflightWebGpuRuntimeAssets(ALLENK_FDNCNN_WEBGPU_WASM_PATHS);
+                    if (!preflight.ok) {
+                        console.warn('WebGPU AI runtime skipped:', preflight.reason);
+                        throw new Error(preflight.reason);
+                    }
+                    setStatus('正在启用 WebGPU AI 去水印...');
+                    const webgpuOrt = await import('onnxruntime-web/webgpu');
+                    return await createAllenkFdncnnOnnxRuntime({
+                        ort: webgpuOrt,
+                        modelBytes,
+                        executionProvider: 'webgpu',
+                        wasmPaths: ALLENK_FDNCNN_WEBGPU_WASM_PATHS,
+                        inputName: 'fdncnn_input',
+                        outputName: 'fdncnn_output',
+                        inputShape: ALLENK_FDNCNN_INPUT_SHAPE,
+                        outputShape: ALLENK_FDNCNN_OUTPUT_SHAPE
+                    });
+                } catch (error) {
+                    console.warn('WebGPU AI runtime unavailable, falling back to WASM:', error);
+                }
+            }
+            return createAllenkFdncnnOnnxRuntime({
+                modelBytes,
+                executionProvider: 'wasm',
+                wasmPaths: ALLENK_FDNCNN_WASM_PATHS,
+                inputName: 'fdncnn_input',
+                outputName: 'fdncnn_output',
+                inputShape: ALLENK_FDNCNN_INPUT_SHAPE,
+                outputShape: ALLENK_FDNCNN_OUTPUT_SHAPE
+            });
+        })();
+    }
+    return allenkFdncnnRuntimePromise;
+}
+
+async function resolveExportDenoiseRuntime(denoiseBackend) {
+    if (denoiseBackend !== VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE) {
+        return null;
+    }
+    setStatus('正在加载 AI FDnCNN ONNX 模型，首次加载会稍慢...');
+    return loadAllenkFdncnnRuntime();
+}
+
+function getAllenkFdncnnTemporalReuseConfig(runtime) {
+    if (!runtime || runtime.executionProvider !== 'wasm') {
+        return null;
+    }
+    const hasThreadedWasm = Boolean(crossOriginIsolated && typeof SharedArrayBuffer !== 'undefined');
+    return {
+        maxFrames: hasThreadedWasm ? 1 : 2,
+        threshold: hasThreadedWasm ? 4.5 : 6.5
+    };
 }
 
 function setProgress(progress, label) {
@@ -205,22 +317,15 @@ function renderAutoPresetSummary(preset = null) {
     if (!els.autoPresetSummary) return;
     if (!preset) {
         els.autoPresetSummary.innerHTML = `
-            <strong>自动参数</strong>
-            <span>选择视频后自动检测并套用合适参数。</span>
+            <strong>AI 自动处理</strong>
+            <span>选择视频后自动检测水印，导出时使用本地 AI 模型清理。</span>
         `;
         return;
     }
 
-    const bitrate = Number(preset.videoBitrateMbps) > 0
-        ? `${preset.videoBitrateMbps}Mbps`
-        : '自动码率';
-    const denoise = preset.denoiseBackend && preset.denoiseBackend !== VIDEO_DENOISE_BACKENDS.NONE
-        ? preset.denoiseBackend
-        : '关闭后端去噪';
     els.autoPresetSummary.innerHTML = `
         <strong>${preset.label}</strong>
         <span>${preset.description}</span>
-        <span class="muted">码率 ${bitrate}，${denoise}</span>
     `;
 }
 
@@ -305,7 +410,7 @@ async function setFile(file) {
         state.metadata = metadata;
         renderMetadata(metadata);
         applyAutomaticPreset(null, metadata, { silent: true });
-        setStatus('视频已载入，导出时会自动检测并选择参数。');
+        setStatus('视频已载入，点击导出即可使用 AI 去水印。');
     } catch (error) {
         console.error(error);
         setStatus(error.message || '读取视频失败', 'error');
@@ -325,6 +430,32 @@ async function routeImageFile(file) {
     }
 }
 
+function getDebugAlphaOptions() {
+    return {
+        alphaProfile: typeof window.__gwrVideoAlphaProfile === 'string'
+            ? window.__gwrVideoAlphaProfile
+            : undefined,
+        alphaLowScale: Number.isFinite(window.__gwrVideoAlphaLowScale)
+            ? window.__gwrVideoAlphaLowScale
+            : undefined,
+        alphaBodyScale: Number.isFinite(window.__gwrVideoAlphaBodyScale)
+            ? window.__gwrVideoAlphaBodyScale
+            : undefined,
+        alphaEdgeBoost: Number.isFinite(window.__gwrVideoAlphaEdgeBoost)
+            ? window.__gwrVideoAlphaEdgeBoost
+            : undefined,
+        alphaLocalRegion: typeof window.__gwrVideoAlphaLocalRegion === 'string'
+            ? window.__gwrVideoAlphaLocalRegion
+            : undefined,
+        alphaLocalLowScale: Number.isFinite(window.__gwrVideoAlphaLocalLowScale)
+            ? window.__gwrVideoAlphaLocalLowScale
+            : undefined,
+        alphaLocalBodyScale: Number.isFinite(window.__gwrVideoAlphaLocalBodyScale)
+            ? window.__gwrVideoAlphaLocalBodyScale
+            : undefined
+    };
+}
+
 async function runDetection() {
     if (!state.file || state.running) return;
     const jobId = ++state.jobId;
@@ -335,6 +466,7 @@ async function runDetection() {
 
     try {
         const result = await detectGeminiVideoWatermark(state.file, {
+            ...getDebugAlphaOptions(),
             sampleCount: Number(els.sampleCount.value) || DEFAULT_SAMPLE_COUNT
         });
         if (jobId !== state.jobId) return;
@@ -345,9 +477,9 @@ async function runDetection() {
         setProgress(1, result.detection.isConfident ? '检测完成' : '低置信');
         const preset = applyAutomaticPreset(result.detection, result.metadata, { silent: true });
         if (preset.id === 'relocated-review') {
-            setStatus('检测到迁移锚点水印，已自动选择复核预设。', 'warn');
+            setStatus('检测完成，导出时会使用 AI 去水印。', result.detection.isConfident ? 'success' : 'warn');
         } else {
-            setStatus(result.detection.isConfident ? '检测完成，已自动选择参数。' : '检测置信度偏低，已保留保守参数。', result.detection.isConfident ? 'success' : 'warn');
+            setStatus(result.detection.isConfident ? '检测完成，导出时会使用 AI 去水印。' : '检测置信度偏低，仍可尝试 AI 导出。', result.detection.isConfident ? 'success' : 'warn');
         }
     } catch (error) {
         console.error(error);
@@ -373,6 +505,7 @@ async function runExport() {
             setProgress(0.04, '检测中');
             setStatus('正在检测水印候选...');
             const detected = await detectGeminiVideoWatermark(state.file, {
+                ...getDebugAlphaOptions(),
                 sampleCount: Number(els.sampleCount.value) || DEFAULT_SAMPLE_COUNT
             });
             if (jobId !== state.jobId) return;
@@ -385,39 +518,32 @@ async function runExport() {
         } else {
             applyAutomaticPreset(detectionPayload.detection, detectionPayload.metadata, { silent: true });
         }
+        applyDebugControlOverrides();
+        const denoiseBackend = els.denoiseBackend.value || DEFAULT_DENOISE_BACKEND;
+        const allenkFdncnnRuntime = await resolveExportDenoiseRuntime(denoiseBackend);
+        const allenkFdncnnTemporalReuse = getAllenkFdncnnTemporalReuseConfig(allenkFdncnnRuntime);
+        const debugAlphaOptions = getDebugAlphaOptions();
+        if (jobId !== state.jobId) return;
 
         const result = await removeGeminiVideoWatermark(state.file, {
             alphaGain: Number(els.alphaGain.value) || DEFAULT_ALPHA_GAIN,
             adaptiveAlpha: els.adaptiveAlpha.checked,
             highQualityCleanup: els.highQualityCleanup.checked,
-            denoiseBackend: els.denoiseBackend.value || DEFAULT_DENOISE_BACKEND,
+            denoiseBackend,
             edgeDenoiseStrength: Number(els.edgeDenoiseStrength.value) || 0,
             residualCleanupStrength: Number(els.residualCleanup.value) || 0,
             videoBitrate: Number(els.videoBitrateMbps.value) > 0
                 ? Number(els.videoBitrateMbps.value) * 1000 * 1000
                 : DEFAULT_VIDEO_BITRATE,
-            alphaLowScale: Number.isFinite(window.__gwrVideoAlphaLowScale)
-                ? window.__gwrVideoAlphaLowScale
-                : undefined,
-            alphaBodyScale: Number.isFinite(window.__gwrVideoAlphaBodyScale)
-                ? window.__gwrVideoAlphaBodyScale
-                : undefined,
-            alphaEdgeBoost: Number.isFinite(window.__gwrVideoAlphaEdgeBoost)
-                ? window.__gwrVideoAlphaEdgeBoost
-                : undefined,
-            alphaLocalRegion: typeof window.__gwrVideoAlphaLocalRegion === 'string'
-                ? window.__gwrVideoAlphaLocalRegion
-                : undefined,
-            alphaLocalLowScale: Number.isFinite(window.__gwrVideoAlphaLocalLowScale)
-                ? window.__gwrVideoAlphaLocalLowScale
-                : undefined,
-            alphaLocalBodyScale: Number.isFinite(window.__gwrVideoAlphaLocalBodyScale)
-                ? window.__gwrVideoAlphaLocalBodyScale
-                : undefined,
+            ...debugAlphaOptions,
             sampleCount: Number(els.sampleCount.value) || DEFAULT_SAMPLE_COUNT,
             detection: detectionPayload,
             allowLowConfidence: els.allowLowConfidence.checked,
-            onProgress: ({ phase, progress, processedFrames, metadata, detection }) => {
+            allenkFdncnnRuntime,
+            allenkFdncnnSigma: 75,
+            allenkFdncnnPadding: 64,
+            allenkFdncnnTemporalReuse,
+            onProgress: ({ phase, progress, processedFrames, metadata, detection, aiDenoiseFrames, aiReuseFrames }) => {
                 if (jobId !== state.jobId) return;
                 if (metadata) {
                     state.metadata = metadata;
@@ -432,8 +558,11 @@ async function runExport() {
                 } else if (phase === 'export') {
                     const exportProgress = 0.12 + progress * 0.88;
                     const frames = Number.isFinite(processedFrames) ? `${processedFrames} 帧` : '处理中';
+                    const aiNote = Number.isFinite(aiDenoiseFrames) && Number.isFinite(aiReuseFrames)
+                        ? `，AI 推理 ${aiDenoiseFrames} 帧，复用 ${aiReuseFrames} 帧`
+                        : '';
                     setProgress(exportProgress, `导出中 ${frames}`);
-                    setStatus(`正在导出视频，已处理 ${frames}。`);
+                    setStatus(`正在导出视频，已处理 ${frames}${aiNote}。`);
                 }
             }
         });
@@ -452,7 +581,13 @@ async function runExport() {
         const audioNote = result.audioCopied
             ? `音频已保留：${result.audioCodec || 'unknown'}，${result.audioPacketCount || 0} packets。`
             : `音频未保留：${result.audioSkipReason || 'unknown'}。`;
-        setStatus(`导出完成，已处理 ${result.processedFrames} 帧，后端去噪：${result.denoiseBackend}。${audioNote}`, 'success');
+        const cleanupNote = result.denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE
+            ? 'AI 去水印已完成'
+            : '去水印已完成';
+        const aiNote = result.denoiseBackend === VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE
+            ? `AI 推理 ${result.aiDenoiseFrames || 0} 帧，复用 ${result.aiReuseFrames || 0} 帧。`
+            : '';
+        setStatus(`${cleanupNote}，已处理 ${result.processedFrames} 帧。${aiNote}${audioNote}`, 'success');
     } catch (error) {
         console.error(error);
         setStatus(error.message || '导出失败', 'error');
@@ -487,7 +622,17 @@ function reset() {
 }
 
 function setNumberControl(input, value) {
+    if (input.hasAttribute('max') && Number(value) > Number(input.getAttribute('max'))) {
+        input.setAttribute('max', String(value));
+    }
     input.value = String(value);
+    if (input === els.alphaGain) {
+        els.alphaGainValue.textContent = Number(input.value).toFixed(2);
+    } else if (input === els.residualCleanup) {
+        els.residualCleanupValue.textContent = Number(input.value).toFixed(2);
+    } else if (input === els.edgeDenoiseStrength) {
+        els.edgeDenoiseStrengthValue.textContent = Number(input.value).toFixed(2);
+    }
     input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
@@ -517,6 +662,21 @@ function applyAutomaticPreset(detection = state.detection, metadata = state.meta
         setStatus(`已自动选择：${preset.label}。`, preset.allowLowConfidence ? 'warn' : 'success');
     }
     return preset;
+}
+
+function applyDebugControlOverrides() {
+    if (Number.isFinite(window.__gwrVideoOverrideEdgeDenoiseStrength)) {
+        setNumberControl(
+            els.edgeDenoiseStrength,
+            Math.max(0, Math.min(3, window.__gwrVideoOverrideEdgeDenoiseStrength))
+        );
+    }
+    if (Number.isFinite(window.__gwrVideoOverrideResidualCleanupStrength)) {
+        setNumberControl(
+            els.residualCleanup,
+            Math.max(0, Math.min(1.8, window.__gwrVideoOverrideResidualCleanupStrength))
+        );
+    }
 }
 
 function applyRelocatedReviewPreset() {
@@ -563,6 +723,10 @@ function setupEvents() {
     });
     els.edgeDenoiseStrength.addEventListener('input', () => {
         els.edgeDenoiseStrengthValue.textContent = Number(els.edgeDenoiseStrength.value).toFixed(2);
+    });
+    els.denoiseBackend.addEventListener('change', () => {
+        if (els.denoiseBackend.value !== VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE) return;
+        setNumberControl(els.edgeDenoiseStrength, 1.8);
     });
     els.detectBtn.addEventListener('click', runDetection);
     els.processBtn.addEventListener('click', runExport);
@@ -612,20 +776,7 @@ async function consumePendingVideoHandoff() {
 }
 
 async function init() {
-    els.alphaGain.value = String(DEFAULT_ALPHA_GAIN);
-    els.alphaGainValue.textContent = DEFAULT_ALPHA_GAIN.toFixed(2);
-    els.adaptiveAlpha.checked = DEFAULT_ADAPTIVE_ALPHA;
-    els.highQualityCleanup.checked = DEFAULT_HIGH_QUALITY_CLEANUP;
-    els.denoiseBackend.value = Object.values(VIDEO_DENOISE_BACKENDS).includes(DEFAULT_DENOISE_BACKEND)
-        ? DEFAULT_DENOISE_BACKEND
-        : VIDEO_DENOISE_BACKENDS.NONE;
-    els.edgeDenoiseStrength.value = String(DEFAULT_EDGE_DENOISE_STRENGTH);
-    els.edgeDenoiseStrengthValue.textContent = DEFAULT_EDGE_DENOISE_STRENGTH.toFixed(2);
-    els.residualCleanup.value = String(DEFAULT_RESIDUAL_CLEANUP_STRENGTH);
-    els.residualCleanupValue.textContent = DEFAULT_RESIDUAL_CLEANUP_STRENGTH.toFixed(2);
-    els.videoBitrateMbps.value = '';
-    els.sampleCount.value = String(DEFAULT_SAMPLE_COUNT);
-    renderAutoPresetSummary(getAutomaticVideoPresetConfig());
+    applyPresetToControls(getAutomaticVideoPresetConfig());
 
     if (!('VideoDecoder' in window) || !('VideoEncoder' in window)) {
         setStatus('当前浏览器缺少 WebCodecs，请使用新版 Chrome 或 Edge。', 'error');

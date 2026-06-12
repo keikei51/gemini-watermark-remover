@@ -4,7 +4,10 @@ import { pathToFileURL } from 'node:url';
 
 import sharp from 'sharp';
 
-import { applyVideoResidualCleanup } from '../src/video/videoCleanupBackends.js';
+import {
+    applyVideoResidualCleanup,
+    applyVideoResidualCleanupAsync
+} from '../src/video/videoCleanupBackends.js';
 import { getVideoAlphaMap } from '../src/video/videoWatermarkDetector.js';
 import {
     formatTimestampFileSuffix,
@@ -238,6 +241,9 @@ async function runCaseLab(caseItem, {
     denoiseBackend,
     edgeDenoiseStrength,
     residualCleanupStrength,
+    allenkFdncnnRuntime = null,
+    allenkFdncnnSigma = undefined,
+    allenkFdncnnPadding = undefined,
     diffAmplify
 }) {
     const caseDir = path.join(outputDir, caseItem.id);
@@ -265,6 +271,7 @@ async function runCaseLab(caseItem, {
     const rows = [];
     const baselineFrames = [];
     const variantFrames = [];
+    const cleanupResults = [];
 
     for (const timestamp of renderResult.timestamps) {
         const suffix = formatTimestampFileSuffix(timestamp);
@@ -279,10 +286,24 @@ async function runCaseLab(caseItem, {
         const referenceImage = await decodeImageData(referencePath);
         const variantImage = cloneImageData(currentImage);
         const ctx = createImageDataContext(variantImage);
-        applyVideoResidualCleanup(ctx, localPosition, alphaMap, {
+        const cleanupOptions = {
             residualCleanupStrength,
             denoiseBackend,
-            edgeDenoiseStrength
+            edgeDenoiseStrength,
+            allenkFdncnnRuntime,
+            allenkFdncnnSigma,
+            allenkFdncnnPadding
+        };
+        const cleanupResult = allenkFdncnnRuntime
+            ? await applyVideoResidualCleanupAsync(ctx, localPosition, alphaMap, cleanupOptions)
+            : applyVideoResidualCleanup(ctx, localPosition, alphaMap, cleanupOptions);
+        cleanupResults.push({
+            timestamp,
+            denoiseRuntimeStatus: cleanupResult.denoiseRuntimeStatus || null,
+            denoiseRuntime: cleanupResult.denoiseRuntime || null,
+            denoiseRuntimeMacs: cleanupResult.denoiseRuntimeMacs ?? null,
+            denoiseRuntimeRunMs: cleanupResult.denoiseRuntimeRunMs ?? null,
+            denoiseRuntimeReason: cleanupResult.denoiseRuntimeReason || null
         });
         await encodePng(variantImage, variantPath);
         await createDiffPanel(currentPath, referencePath, currentDiffPath, { amplify: diffAmplify });
@@ -346,8 +367,11 @@ async function runCaseLab(caseItem, {
         profile: {
             denoiseBackend,
             edgeDenoiseStrength,
-            residualCleanupStrength
+            residualCleanupStrength,
+            allenkFdncnnSigma,
+            allenkFdncnnPadding
         },
+        cleanupResults,
         baselineAggregate,
         variantAggregate,
         deltas: calculateBucketDeltas(variantAggregate, baselineAggregate)
@@ -372,6 +396,9 @@ export function renderVideoFrameBackendLabMarkdown(report) {
     lines.push(`Backend: ${report.profile.denoiseBackend}`);
     lines.push(`Edge denoise strength: ${report.profile.edgeDenoiseStrength}`);
     lines.push(`Residual cleanup strength: ${report.profile.residualCleanupStrength}`);
+    if (report.profile.allenkFdncnnRuntime) {
+        lines.push(`allenk runtime: ${report.profile.allenkFdncnnRuntime}`);
+    }
     lines.push('');
     lines.push('| Case | Active Δ | Edge Δ | LowBody Δ | HighBody Δ | Sheet |');
     lines.push('|---|---:|---:|---:|---:|---|');
@@ -392,6 +419,13 @@ export function renderVideoFrameBackendLabMarkdown(report) {
     for (const item of report.cases) {
         lines.push(`### ${item.id}`);
         lines.push('');
+        const appliedRuntimeFrames = (item.cleanupResults || [])
+            .filter((result) => result.denoiseRuntimeStatus === 'applied');
+        if (appliedRuntimeFrames.length) {
+            const avgRunMs = appliedRuntimeFrames.reduce((sum, result) => sum + (result.denoiseRuntimeRunMs || 0), 0) / appliedRuntimeFrames.length;
+            lines.push(`Runtime: ${appliedRuntimeFrames[0].denoiseRuntime}, applied frames: ${appliedRuntimeFrames.length}, avg run: ${formatNumber(avgRunMs, 1)}ms`);
+            lines.push('');
+        }
         lines.push('| Bucket | Baseline meanAbs/RMS | Variant meanAbs/RMS | Δ meanAbs | Verdict |');
         lines.push('|---|---:|---:|---:|---|');
         for (const bucket of ['active', 'edge', 'lowBody', 'highBody']) {
@@ -419,6 +453,9 @@ export async function runVideoFrameBackendLab({
     denoiseBackend = DEFAULT_DENOISE_BACKEND,
     edgeDenoiseStrength = DEFAULT_EDGE_DENOISE_STRENGTH,
     residualCleanupStrength = 0,
+    allenkFdncnnRuntime = null,
+    allenkFdncnnSigma = undefined,
+    allenkFdncnnPadding = undefined,
     diffAmplify = DEFAULT_DIFF_AMPLIFY
 } = {}) {
     const manifest = await loadVideoCropBenchmarkManifest(manifestPath);
@@ -438,6 +475,9 @@ export async function runVideoFrameBackendLab({
             denoiseBackend,
             edgeDenoiseStrength,
             residualCleanupStrength,
+            allenkFdncnnRuntime,
+            allenkFdncnnSigma,
+            allenkFdncnnPadding,
             diffAmplify
         }));
     }
@@ -449,7 +489,10 @@ export async function runVideoFrameBackendLab({
         profile: {
             denoiseBackend,
             edgeDenoiseStrength,
-            residualCleanupStrength
+            residualCleanupStrength,
+            allenkFdncnnRuntime: allenkFdncnnRuntime?.id || null,
+            allenkFdncnnSigma,
+            allenkFdncnnPadding
         },
         cases: results
     };

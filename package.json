@@ -93,6 +93,7 @@
     "report:video-crops": "node scripts/report-video-crop-benchmark.js",
     "diagnose:video-lowbody": "node scripts/diagnose-video-lowbody-regression.js",
     "lab:video-frames": "node scripts/run-video-frame-backend-lab.js",
+    "lab:allenk-fdncnn-onnx-frames": "node scripts/run-allenk-fdncnn-onnx-frame-lab.js",
     "lab:video-alpha-profile": "node scripts/run-video-alpha-profile-lab.js",
     "lab:video-temporal-residual": "node scripts/run-video-temporal-residual-lab.js",
     "fit:video-alpha-shape": "node scripts/fit-video-alpha-shape.js",
@@ -117,13 +118,21 @@
     "report:video-delivery-bundle": "node scripts/create-video-delivery-bundle.js",
     "verify:video-delivery-bundle": "node scripts/verify-video-delivery-bundle.js",
     "export:video-backend": "node scripts/export-video-backend-variant.js",
+    "export:allenk-fdncnn-onnx-video": "node scripts/export-allenk-fdncnn-onnx-video.js",
+    "export:allenk-fdncnn-onnx-frame-video": "node scripts/export-allenk-fdncnn-onnx-frame-video.js",
+    "report:allenk-fdncnn-onnx-video-evidence": "node scripts/create-allenk-fdncnn-onnx-video-evidence.js",
     "export:video-ui-preset": "node scripts/export-video-ui-preset.js",
     "render:video-comparison-grid": "node scripts/render-video-comparison-grid.js",
     "package:extension": "node scripts/package-extension-release.js",
     "cli:smoke": "node bin/gwr.mjs --help",
     "serve": "pnpm dlx serve dist",
     "export:samples": "node scripts/export-fixed-samples.js",
-    "calibrate:preview-alpha": "node scripts/calibrate-preview-alpha.js"
+    "calibrate:preview-alpha": "node scripts/calibrate-preview-alpha.js",
+    "extract:allenk-fdncnn": "node scripts/extract-allenk-fdncnn-model.js",
+    "export:allenk-fdncnn-onnx": "node scripts/export-allenk-fdncnn-onnx.js",
+    "smoke:allenk-fdncnn-onnx-runtime": "node scripts/smoke-allenk-fdncnn-onnx-runtime.js",
+    "report:allenk-fdncnn-browser-spike": "node scripts/create-allenk-fdncnn-browser-spike-report.js",
+    "report:allenk-fdncnn-runtime-seam": "node scripts/create-allenk-fdncnn-runtime-seam-report.js"
   },
   "peerDependencies": {
     "sharp": "^0.34.5"
@@ -136,6 +145,7 @@
   "devDependencies": {
     "@types/node": "^24.6.0",
     "esbuild": "^0.24.0",
+    "onnxruntime-web": "^1.26.0",
     "playwright": "^1.58.2",
     "sharp": "^0.34.5",
     "typescript": "^5.9.3"

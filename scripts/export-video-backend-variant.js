@@ -7,11 +7,16 @@ import { chromium } from 'playwright';
 const DEFAULT_PAGE_PATH = path.resolve('dist/video-preview.html');
 const DEFAULT_DENOISE_BACKEND = 'none';
 
+function isHttpUrl(value) {
+    return /^https?:\/\//i.test(String(value || ''));
+}
+
 function parseArgs(argv) {
     const args = {
         pagePath: DEFAULT_PAGE_PATH,
         denoiseBackend: DEFAULT_DENOISE_BACKEND,
         alphaGain: null,
+        alphaProfile: null,
         alphaLowScale: null,
         alphaBodyScale: null,
         alphaEdgeBoost: null,
@@ -21,6 +26,7 @@ function parseArgs(argv) {
         adaptiveAlpha: false,
         allowLowConfidence: false,
         edgeDenoiseStrength: null,
+        residualCleanupStrength: null,
         videoBitrate: null,
         timeoutMs: 6 * 60 * 1000
     };
@@ -34,11 +40,14 @@ function parseArgs(argv) {
         } else if (arg === '--output') {
             args.outputPath = path.resolve(argv[++i]);
         } else if (arg === '--page') {
-            args.pagePath = path.resolve(argv[++i]);
+            const pageValue = argv[++i];
+            args.pagePath = isHttpUrl(pageValue) ? pageValue : path.resolve(pageValue);
         } else if (arg === '--denoise-backend') {
             args.denoiseBackend = argv[++i];
         } else if (arg === '--alpha-gain') {
             args.alphaGain = Number(argv[++i]);
+        } else if (arg === '--alpha-profile') {
+            args.alphaProfile = argv[++i];
         } else if (arg === '--alpha-low-scale') {
             args.alphaLowScale = Number(argv[++i]);
         } else if (arg === '--alpha-body-scale') {
@@ -55,6 +64,8 @@ function parseArgs(argv) {
             args.adaptiveAlpha = true;
         } else if (arg === '--edge-denoise-strength') {
             args.edgeDenoiseStrength = Number(argv[++i]);
+        } else if (arg === '--residual-cleanup-strength') {
+            args.residualCleanupStrength = Number(argv[++i]);
         } else if (arg === '--video-bitrate') {
             args.videoBitrate = Number(argv[++i]);
         } else if (arg === '--allow-low-confidence') {
@@ -79,6 +90,7 @@ Options:
   --denoise-backend <name>     none | canvas-edge-denoise | canvas-edge-band-denoise | canvas-edge-core-denoise | canvas-footprint-polish | canvas-temporal-delta-stabilize | canvas-temporal-match-delta-stabilize | canvas-temporal-stabilize | canvas-texture-repair
                                canvas-temporal-match-delta-stabilize is a relocated-anchor human-review candidate, not a default backend.
   --alpha-gain <n>             Optional alpha seed gain
+  --alpha-profile <name>       Optional embedded alpha profile, for example 96 or 96-20260520
   --alpha-low-scale <n>        Optional low-alpha template scale for fitting experiments
   --alpha-body-scale <n>       Optional body-alpha template scale for fitting experiments
   --alpha-edge-boost <n>       Optional edge boost override for fitting experiments
@@ -86,7 +98,8 @@ Options:
   --alpha-local-low-scale <n>  Optional local low-alpha scale for fitting experiments
   --alpha-local-body-scale <n> Optional local body-alpha scale for fitting experiments
   --adaptive-alpha             Enable per-frame adaptive alpha refinement
-  --edge-denoise-strength <n>  Optional 0..1 value for canvas edge denoise backends
+  --edge-denoise-strength <n>  Optional strength, 0..1 for canvas backends and 0..3 for AI backend
+  --residual-cleanup-strength <n> Optional 0..1.8 post-cleanup strength
   --video-bitrate <bps>        Optional output bitrate in bits per second
   --allow-low-confidence       Allow export when detector confidence is low
   --page <dist html path>      Defaults to dist/video-preview.html
@@ -130,10 +143,33 @@ async function setNumericInputValue(page, selector, value, { step = null } = {})
         const input = document.querySelector(targetSelector);
         if (!input) throw new Error(`找不到控件: ${targetSelector}`);
         if (targetStep !== null) input.setAttribute('step', targetStep);
+        if (input.hasAttribute('max') && Number(targetValue) > Number(input.getAttribute('max'))) {
+            input.setAttribute('max', String(targetValue));
+        }
         input.value = String(targetValue);
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
     }, { selector, value, step });
+}
+
+async function setControlValue(page, selector, value) {
+    await page.evaluate(({ selector: targetSelector, value: targetValue }) => {
+        const control = document.querySelector(targetSelector);
+        if (!control) throw new Error(`找不到控件: ${targetSelector}`);
+        control.value = String(targetValue);
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+        control.dispatchEvent(new Event('change', { bubbles: true }));
+    }, { selector, value });
+}
+
+async function setCheckboxValue(page, selector, checked) {
+    await page.evaluate(({ selector: targetSelector, checked: targetChecked }) => {
+        const checkbox = document.querySelector(targetSelector);
+        if (!checkbox) throw new Error(`找不到控件: ${targetSelector}`);
+        checkbox.checked = Boolean(targetChecked);
+        checkbox.dispatchEvent(new Event('input', { bubbles: true }));
+        checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+    }, { selector, checked });
 }
 
 export async function exportVideoBackendVariant({
@@ -142,6 +178,7 @@ export async function exportVideoBackendVariant({
     pagePath = DEFAULT_PAGE_PATH,
     denoiseBackend = DEFAULT_DENOISE_BACKEND,
     alphaGain = null,
+    alphaProfile = null,
     alphaLowScale = null,
     alphaBodyScale = null,
     alphaEdgeBoost = null,
@@ -150,6 +187,7 @@ export async function exportVideoBackendVariant({
     alphaLocalBodyScale = null,
     adaptiveAlpha = false,
     edgeDenoiseStrength = null,
+    residualCleanupStrength = null,
     videoBitrate = null,
     allowLowConfidence = false,
     timeoutMs = 6 * 60 * 1000
@@ -161,12 +199,17 @@ export async function exportVideoBackendVariant({
     try {
         const page = await browser.newPage();
         page.setDefaultTimeout(timeoutMs);
-        await page.goto(pathToFileURL(pagePath).href);
+        await page.goto(isHttpUrl(pagePath) ? pagePath : pathToFileURL(pagePath).href);
         await page.locator('#fileInput').setInputFiles(inputPath);
-        await page.locator('#denoiseBackend').selectOption(denoiseBackend);
+        await setControlValue(page, '#denoiseBackend', denoiseBackend);
         if (Number.isFinite(alphaGain) && alphaGain > 0) {
             await page.locator('#alphaGain').fill(String(Math.max(0.25, Math.min(1.35, alphaGain))));
             await page.locator('#alphaGain').dispatchEvent('input');
+        }
+        if (typeof alphaProfile === 'string' && alphaProfile) {
+            await page.evaluate((value) => {
+                window.__gwrVideoAlphaProfile = value;
+            }, alphaProfile);
         }
         if (Number.isFinite(alphaLowScale) && alphaLowScale > 0) {
             await page.evaluate((value) => {
@@ -199,10 +242,21 @@ export async function exportVideoBackendVariant({
             }, Math.max(0.5, Math.min(1.5, alphaLocalBodyScale)));
         }
         if (adaptiveAlpha) {
-            await page.locator('#adaptiveAlpha').check();
+            await setCheckboxValue(page, '#adaptiveAlpha', true);
         }
         if (Number.isFinite(edgeDenoiseStrength)) {
-            await setNumericInputValue(page, '#edgeDenoiseStrength', Math.max(0, Math.min(1, edgeDenoiseStrength)), {
+            await page.evaluate((value) => {
+                window.__gwrVideoOverrideEdgeDenoiseStrength = value;
+            }, Math.max(0, Math.min(3, edgeDenoiseStrength)));
+            await setNumericInputValue(page, '#edgeDenoiseStrength', Math.max(0, Math.min(3, edgeDenoiseStrength)), {
+                step: 'any'
+            });
+        }
+        if (Number.isFinite(residualCleanupStrength)) {
+            await page.evaluate((value) => {
+                window.__gwrVideoOverrideResidualCleanupStrength = value;
+            }, Math.max(0, Math.min(1.8, residualCleanupStrength)));
+            await setNumericInputValue(page, '#residualCleanup', Math.max(0, Math.min(1.8, residualCleanupStrength)), {
                 step: 'any'
             });
         }
@@ -210,7 +264,7 @@ export async function exportVideoBackendVariant({
             await setNumericInputValue(page, '#videoBitrateMbps', videoBitrate / 1000 / 1000);
         }
         if (allowLowConfidence) {
-            await page.locator('#allowLowConfidence').check();
+            await setCheckboxValue(page, '#allowLowConfidence', true);
         }
         await page.locator('#processBtn').click();
         await page.waitForFunction(() => {
@@ -236,6 +290,7 @@ export async function exportVideoBackendVariant({
             actualDenoiseBackend: actualControls.denoiseBackend,
             actualControls,
             alphaGain: Number.isFinite(alphaGain) ? alphaGain : undefined,
+            alphaProfile: alphaProfile || undefined,
             alphaLowScale: Number.isFinite(alphaLowScale) ? alphaLowScale : undefined,
             alphaBodyScale: Number.isFinite(alphaBodyScale) ? alphaBodyScale : undefined,
             alphaEdgeBoost: Number.isFinite(alphaEdgeBoost) ? alphaEdgeBoost : undefined,
@@ -244,6 +299,7 @@ export async function exportVideoBackendVariant({
             alphaLocalBodyScale: Number.isFinite(alphaLocalBodyScale) ? alphaLocalBodyScale : undefined,
             adaptiveAlpha,
             edgeDenoiseStrength: Number.isFinite(edgeDenoiseStrength) ? edgeDenoiseStrength : undefined,
+            residualCleanupStrength: Number.isFinite(residualCleanupStrength) ? residualCleanupStrength : undefined,
             videoBitrate: Number.isFinite(videoBitrate) ? videoBitrate : undefined,
             bytes: buffer.byteLength,
             status

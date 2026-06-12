@@ -44,15 +44,19 @@ test('shouldUseRelocatedReviewPreset should require confident relocated detectio
     }, { width: 1920, height: 1080 }), true);
 });
 
-test('getRelocatedReviewPresetConfig should match the reviewed human-review candidate', () => {
+test('getRelocatedReviewPresetConfig should keep relocated anchors on the AI path', () => {
     assert.deepEqual({
+        label: getRelocatedReviewPresetConfig().label,
         denoiseBackend: getRelocatedReviewPresetConfig().denoiseBackend,
         edgeDenoiseStrength: getRelocatedReviewPresetConfig().edgeDenoiseStrength,
+        residualCleanupStrength: getRelocatedReviewPresetConfig().residualCleanupStrength,
         videoBitrateMbps: getRelocatedReviewPresetConfig().videoBitrateMbps,
         allowLowConfidence: getRelocatedReviewPresetConfig().allowLowConfidence
     }, {
-        denoiseBackend: VIDEO_DENOISE_BACKENDS.CANVAS_TEMPORAL_MATCH_DELTA_STABILIZE,
-        edgeDenoiseStrength: 0.25,
+        label: 'AI 自动处理',
+        denoiseBackend: VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE,
+        edgeDenoiseStrength: 1.8,
+        residualCleanupStrength: 0.4,
         videoBitrateMbps: 12,
         allowLowConfidence: true
     });
@@ -65,6 +69,9 @@ test('getAutomaticVideoPresetConfig should keep normal detections on conservativ
     }, { width: 1920, height: 1080 });
 
     assert.equal(preset.id, 'standard-auto');
+    assert.equal(preset.denoiseBackend, VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE);
+    assert.equal(preset.edgeDenoiseStrength, 1.8);
+    assert.equal(preset.residualCleanupStrength, 0.4);
     assert.deepEqual(preset, getStandardAutoPresetConfig());
 });
 
@@ -75,5 +82,5 @@ test('getAutomaticVideoPresetConfig should switch relocated detections to review
     }, { width: 1920, height: 1080 });
 
     assert.equal(preset.id, 'relocated-review');
-    assert.equal(preset.denoiseBackend, VIDEO_DENOISE_BACKENDS.CANVAS_TEMPORAL_MATCH_DELTA_STABILIZE);
+    assert.equal(preset.denoiseBackend, VIDEO_DENOISE_BACKENDS.ALLENK_FDNCNN_BROWSER_SPIKE);
 });

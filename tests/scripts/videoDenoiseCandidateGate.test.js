@@ -149,6 +149,26 @@ test('createVideoDenoiseCandidateGateReport should send warning-only regressions
     assert.equal(report.candidates[0].summary.warningLayers, 1);
 });
 
+test('createVideoDenoiseCandidateGateReport should not promote synthetic seam-only evidence', () => {
+    const report = createVideoDenoiseCandidateGateReport({
+        reports: [
+            {
+                reportPath: 'runtime-seam.json',
+                report: frameLabReport({
+                    denoiseBackend: 'allenk-fdncnn-browser-spike',
+                    edgeDenoiseStrength: 1,
+                    syntheticSeamFixture: true
+                }, [
+                    { id: 'synthetic-case', deltas: deltas({ active: 'improved', edge: 'improved' }) }
+                ])
+            }
+        ]
+    });
+
+    assert.equal(report.candidates[0].decision, 'synthetic-seam-evidence-only');
+    assert.equal(report.candidates[0].summary.syntheticSeamOnly, true);
+});
+
 test('createVideoDenoiseCandidateGateReport should not reject regressions reproduced by encoding control', () => {
     const report = createVideoDenoiseCandidateGateReport({
         reports: [
