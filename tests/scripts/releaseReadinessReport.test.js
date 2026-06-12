@@ -1171,6 +1171,8 @@ test('createReleaseReadinessReport should require rebuild when release build inp
     const releaseClaimFiles = await writeSafeReleaseClaimFile(tempDir);
     const releaseVersionDocs = await writeReleaseVersionDocs(tempDir);
     const userscript = await writeUserscriptArtifact(tempDir);
+    const videoProductionSources = await writeVideoProductionSourceFiles(tempDir);
+    const videoDeliveryArtifacts = await writeVideoDeliveryArtifacts(tempDir);
 
     const visibleDir = path.join(tempDir, 'visible');
     await writeJson(path.join(visibleDir, 'loop-summary.json'), {
@@ -1235,7 +1237,9 @@ test('createReleaseReadinessReport should require rebuild when release build inp
                 [path.join(releaseDir, extensionFile)]: Date.parse('2026-06-11T00:00:00.000Z'),
                 'src/core/watermarkProcessor.js': Date.parse('2026-06-11T00:01:00.000Z')
             },
-            releaseVersionDocs
+            releaseVersionDocs,
+            ...videoDeliveryArtifacts,
+            ...videoProductionSources
         }
     });
 
@@ -1269,6 +1273,8 @@ test('createReleaseReadinessReport should allow dirty build inputs when zip is n
     const releaseClaimFiles = await writeSafeReleaseClaimFile(tempDir);
     const releaseVersionDocs = await writeReleaseVersionDocs(tempDir);
     const userscript = await writeUserscriptArtifact(tempDir);
+    const videoProductionSources = await writeVideoProductionSourceFiles(tempDir);
+    const videoDeliveryArtifacts = await writeVideoDeliveryArtifacts(tempDir);
 
     const visibleDir = path.join(tempDir, 'visible');
     await writeJson(path.join(visibleDir, 'loop-summary.json'), {
@@ -1333,7 +1339,9 @@ test('createReleaseReadinessReport should allow dirty build inputs when zip is n
                 [path.join(releaseDir, extensionFile)]: Date.parse('2026-06-11T00:02:00.000Z'),
                 'src/core/watermarkProcessor.js': Date.parse('2026-06-11T00:01:00.000Z')
             },
-            releaseVersionDocs
+            releaseVersionDocs,
+            ...videoDeliveryArtifacts,
+            ...videoProductionSources
         }
     });
 

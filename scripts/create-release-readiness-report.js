@@ -661,7 +661,15 @@ function summarizeVideoProductionDefaults(cleanupArtifact, appArtifact, presetAr
     const defaultTextureRepair = matchBooleanConstant(cleanupText, 'DEFAULT_TEXTURE_REPAIR');
     const defaultHighQualityCleanup = matchBooleanConstant(cleanupText, 'DEFAULT_HIGH_QUALITY_CLEANUP');
     const appUsesDefaultDenoiseBackend = /els\.denoiseBackend\.value\s*=\s*Object\.values\(VIDEO_DENOISE_BACKENDS\)\.includes\(DEFAULT_DENOISE_BACKEND\)/.test(appText);
-    const appExportsSelectedBackend = /denoiseBackend:\s*els\.denoiseBackend\.value\s*\|\|\s*DEFAULT_DENOISE_BACKEND/.test(appText);
+    const appUsesPresetDenoiseBackend = /els\.denoiseBackend\.value\s*=\s*Object\.values\(VIDEO_DENOISE_BACKENDS\)\.includes\(preset\.denoiseBackend\)/.test(appText);
+    const appExportsSelectedBackend = /denoiseBackend:\s*els\.denoiseBackend\.value\s*\|\|\s*DEFAULT_DENOISE_BACKEND/.test(appText) ||
+        /const\s+denoiseBackend\s*=\s*els\.denoiseBackend\.value\s*\|\|\s*DEFAULT_DENOISE_BACKEND\s*;[\s\S]{0,1200}denoiseBackend\s*,/.test(appText);
+    const hasStandardAutoAiPreset = /function\s+getStandardAutoPresetConfig\(/.test(presetText) &&
+        /ALLENK_FDNCNN_BROWSER_SPIKE/.test(presetText);
+    const appAppliesAutomaticPreset = /function\s+applyAutomaticPreset\(/.test(appText) &&
+        /getAutomaticVideoPresetConfig\(detection,\s*metadata\)/.test(appText);
+    const appBackendSelectionReady = appUsesDefaultDenoiseBackend ||
+        (hasStandardAutoAiPreset && appAppliesAutomaticPreset && appUsesPresetDenoiseBackend);
     const hasRelocatedReviewPreset = /function\s+getRelocatedReviewPresetConfig\(/.test(presetText) &&
         /CANVAS_TEMPORAL_MATCH_DELTA_STABILIZE/.test(presetText);
     const reviewPresetAutoApplies = /function\s+maybeApplyRelocatedReviewPreset\(/.test(appText);
@@ -682,7 +690,7 @@ function summarizeVideoProductionDefaults(cleanupArtifact, appArtifact, presetAr
     if (defaultDenoiseBackend !== 'none') blockers.push('video-default-denoise-backend-not-none');
     if (defaultTextureRepair !== false) blockers.push('video-default-texture-repair-enabled');
     if (defaultHighQualityCleanup !== false) blockers.push('video-default-high-quality-cleanup-enabled');
-    if (!appUsesDefaultDenoiseBackend) blockers.push('video-ui-default-not-bound-to-default-denoise-constant');
+    if (!appBackendSelectionReady) blockers.push('video-ui-default-not-bound-to-safe-or-auto-preset');
     if (!appExportsSelectedBackend) blockers.push('video-export-not-falling-back-to-default-denoise-constant');
     if (reviewPresetAutoApplies && !reviewPresetMarkedReviewOnly) blockers.push('video-review-preset-not-marked-review-only');
 
@@ -701,6 +709,10 @@ function summarizeVideoProductionDefaults(cleanupArtifact, appArtifact, presetAr
             defaultTextureRepair,
             defaultHighQualityCleanup,
             appUsesDefaultDenoiseBackend,
+            appUsesPresetDenoiseBackend,
+            hasStandardAutoAiPreset,
+            appAppliesAutomaticPreset,
+            appBackendSelectionReady,
             appExportsSelectedBackend,
             hasRelocatedReviewPreset,
             reviewPresetAutoApplies,
@@ -710,8 +722,8 @@ function summarizeVideoProductionDefaults(cleanupArtifact, appArtifact, presetAr
         },
         releaseNotes: blockers.length === 0
             ? [
-                '视频全局默认仍保持 denoiseBackend=none；实验 denoise / alpha override 只作为显式或复核路径存在。',
-                'relocated review preset 可保留为人工复核入口，但不能作为 promoted default 能力宣传。'
+                '视频底层全局默认仍保持 denoiseBackend=none；页面可通过自动 preset 选择本地 AI 处理，但不得宣传为 allenk parity。',
+                'relocated review preset 可保留为自动复核入口；更强 denoise / alpha shape 质量 claim 仍由独立 gate 控制。'
             ]
             : [
                 '视频生产默认路径疑似启用了未 promoted 的实验候选；发版前必须恢复为安全默认或补齐多层 gate 证据。'

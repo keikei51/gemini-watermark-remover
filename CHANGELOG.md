@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.21 - 2026-06-12
+
+### SDK / CLI
+
+- Added the `@pilio/gemini-watermark-remover/video` SDK entrypoint for local video watermark removal with injectable processors and a Playwright-backed preview-page default.
+- Re-exported video helpers from the Node SDK and added CLI routing for `.mp4`, `.webm`, and `.mov` inputs.
+- Added CLI flags for video page selection, denoise backend selection, timeout control, and low-confidence export handling.
+
+### Video
+
+- Added the browser AI cleanup path used by the local video preview exporter, including adjacent-frame reuse telemetry for faster repeated watermark regions.
+
 ## 1.0.20 - 2026-06-09
 
 ### SDK
