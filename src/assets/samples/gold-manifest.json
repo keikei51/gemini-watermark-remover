@@ -99,6 +99,12 @@
       "expectedAlphaGain": { "min": 0.5, "max": 1 },
       "tags": ["catalog-large-margin"]
     },
+    "20260613.png": {
+      "shouldProcess": true,
+      "expectedAnchor": { "logoSize": 42, "marginRight": 82, "marginBottom": 82 },
+      "expectedAlphaGain": { "min": 0.4, "max": 0.6 },
+      "tags": ["near-official-projected-large-margin"]
+    },
     "21-9.png": {
       "shouldProcess": true,
       "expectedAnchor": { "logoSize": 48, "marginRight": 96, "marginBottom": 96 },

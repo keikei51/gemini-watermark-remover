@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.22 - 2026-06-14
+
+### Watermark Removal
+
+- Added support for the newly observed near-official Gemini large-margin anchor reported by the 2026-06-13 sample.
+- Added evidence-gated small-anchor relocation for visible fixed-local residuals and stronger mid-alpha tuning for high-confidence 48px large-margin residuals.
+- Kept unsafe-looking remaining candidates out of the production path when lower residual scores produced visible dark edge artifacts.
+
+### Quality
+
+- Added regression coverage for the 2026-06-13 anchor, small-anchor relocation, and stronger mid-alpha selection.
+- Re-verified the external Gemini watermark sample set with 186 of 189 samples passing and no newly failing samples.
+
 ## 1.0.21 - 2026-06-12
 
 ### SDK / CLI

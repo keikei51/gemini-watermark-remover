@@ -149,7 +149,11 @@ const WEAK_ALPHA_FINE_TUNE_MAX_GRADIENT_INCREASE = 0.08;
 const STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_SPATIAL = 0.75;
 const STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_GRADIENT = 0.65;
 const STRONG_POSITIVE_FINE_TUNE_MIN_CURRENT_SPATIAL = 0.3;
+const STRONG_POSITIVE_FINE_TUNE_MID_GAINS = Object.freeze([0.7, 0.85]);
 const STRONG_POSITIVE_FINE_TUNE_EXTRA_GAINS = Object.freeze([0.95, 1]);
+const STRONG_POSITIVE_FINE_TUNE_MAX_ACCEPTED_SPATIAL = 0.12;
+const STRONG_POSITIVE_FINE_TUNE_MAX_ACCEPTED_GRADIENT = 0.25;
+const STRONG_POSITIVE_FINE_TUNE_MAX_POSITIVE_HALO_LUM = 4;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MIN_ORIGINAL_SPATIAL = 0.6;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MIN_ORIGINAL_GRADIENT = 0.45;
 const CATALOG_ALPHA_DARK_FINE_TUNE_MAX_NEGATIVE_RESIDUAL = -0.12;
@@ -164,6 +168,15 @@ const SMALL_PREVIEW_REFINEMENT_MIN_CURRENT_SPATIAL = 0.04;
 const SMALL_PREVIEW_REFINEMENT_MAX_CURRENT_GRADIENT = 0.08;
 const FIRST_PASS_SIGN_FLIP_GRADIENT_THRESHOLD = 0.08;
 const FIRST_PASS_SIGN_FLIP_MIN_GRADIENT_DROP = 0.2;
+const SMALL_ANCHOR_RELOCATION_MIN_SIZE = 40;
+const SMALL_ANCHOR_RELOCATION_MAX_SIZE = 56;
+const SMALL_ANCHOR_RELOCATION_SIZE_DELTA = 5;
+const SMALL_ANCHOR_RELOCATION_MARGIN_DELTA = 10;
+const SMALL_ANCHOR_RELOCATION_MIN_CURRENT_GRADIENT = 0.24;
+const SMALL_ANCHOR_RELOCATION_MAX_ACCEPTED_SPATIAL = 0.14;
+const SMALL_ANCHOR_RELOCATION_MAX_ACCEPTED_GRADIENT = 0.24;
+const SMALL_ANCHOR_RELOCATION_MIN_ORIGINAL_SPATIAL = 0.32;
+const SMALL_ANCHOR_RELOCATION_MIN_SUPPRESSION_GAIN = 0.22;
 
 function nowMs() {
     if (typeof globalThis.performance?.now === 'function') {
@@ -560,12 +573,16 @@ function fineTuneWeakPositiveResidualAlpha({
         alphaGainCandidates.add(alphaGain);
     }
 
-    if (
+    const shouldTryStrongPositiveFineTune =
         currentSpatialScore >= STRONG_POSITIVE_FINE_TUNE_MIN_CURRENT_SPATIAL &&
         originalSpatialScore >= STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_SPATIAL &&
-        originalGradientScore >= STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_GRADIENT
-    ) {
-        for (const alphaGain of STRONG_POSITIVE_FINE_TUNE_EXTRA_GAINS) {
+        originalGradientScore >= STRONG_POSITIVE_FINE_TUNE_MIN_ORIGINAL_GRADIENT;
+
+    if (shouldTryStrongPositiveFineTune) {
+        for (const alphaGain of [
+            ...STRONG_POSITIVE_FINE_TUNE_MID_GAINS,
+            ...STRONG_POSITIVE_FINE_TUNE_EXTRA_GAINS
+        ]) {
             alphaGainCandidates.add(alphaGain);
         }
     }
@@ -597,17 +614,22 @@ function fineTuneWeakPositiveResidualAlpha({
         });
         const absSpatialImprovement = Math.abs(currentSpatialScore) - Math.abs(spatialScore);
         const gradientIncrease = gradientScore - currentGradientScore;
-        if (
+        const strongPositiveClearsResidual = shouldTryStrongPositiveFineTune &&
+            Math.abs(spatialScore) <= STRONG_POSITIVE_FINE_TUNE_MAX_ACCEPTED_SPATIAL &&
+            gradientScore <= STRONG_POSITIVE_FINE_TUNE_MAX_ACCEPTED_GRADIENT &&
+            (artifacts?.halo?.positiveDeltaLum ?? Number.POSITIVE_INFINITY) <= STRONG_POSITIVE_FINE_TUNE_MAX_POSITIVE_HALO_LUM;
+        if (!strongPositiveClearsResidual && (
             absSpatialImprovement < WEAK_ALPHA_FINE_TUNE_MIN_ABS_SPATIAL_IMPROVEMENT ||
             gradientIncrease > WEAK_ALPHA_FINE_TUNE_MAX_GRADIENT_INCREASE
-        ) {
+        )) {
             continue;
         }
 
         const cost = artifacts
             ? artifacts.visualArtifactCost + Math.max(0, gradientIncrease) * 0.25
             : Math.abs(spatialScore) + Math.max(0, gradientIncrease) * 0.25 + nearBlackRatio * 2;
-        if (!best || cost < best.cost) {
+        const clearsResidual = strongPositiveClearsResidual;
+        if (!best || (clearsResidual && !best.clearsResidual) || (clearsResidual === best.clearsResidual && cost < best.cost)) {
             best = {
                 imageData: candidate,
                 alphaGain,
@@ -615,7 +637,8 @@ function fineTuneWeakPositiveResidualAlpha({
                 gradientScore,
                 nearBlackRatio,
                 suppressionGain: originalSpatialScore - spatialScore,
-                cost
+                cost,
+                clearsResidual
             };
         }
     }
@@ -1850,6 +1873,198 @@ function refineLocatedAggressiveRemoval({
     return best;
 }
 
+function shouldRelocateSmallFixedLocalAnchor({
+    source,
+    config,
+    position,
+    currentGradientScore,
+    currentResidualVisibility
+}) {
+    const sourceText = String(source || '');
+    if (!sourceText.includes('fixed-local')) return false;
+    if (
+        !position ||
+        position.width !== position.height ||
+        position.width < SMALL_ANCHOR_RELOCATION_MIN_SIZE ||
+        position.width > SMALL_ANCHOR_RELOCATION_MAX_SIZE
+    ) {
+        return false;
+    }
+    if (
+        !config ||
+        config.logoSize < SMALL_ANCHOR_RELOCATION_MIN_SIZE ||
+        config.logoSize > SMALL_ANCHOR_RELOCATION_MAX_SIZE
+    ) {
+        return false;
+    }
+    if (!currentResidualVisibility?.visible) return false;
+    return currentResidualVisibility.visiblePositiveHalo === true ||
+        currentGradientScore >= SMALL_ANCHOR_RELOCATION_MIN_CURRENT_GRADIENT;
+}
+
+function resolveRelocationAlphaMap({ size, currentAlphaMap, currentPosition, alpha96, getAlphaMap }) {
+    if (size === currentPosition?.width) return currentAlphaMap;
+    if (typeof getAlphaMap === 'function') {
+        const resolved = getAlphaMap(size);
+        if (resolved) return resolved;
+    }
+    return interpolateAlphaMap(alpha96, 96, size);
+}
+
+function buildSmallAnchorRelocationCandidate({
+    originalImageData,
+    alphaMap,
+    size,
+    marginRight,
+    marginBottom,
+    alphaGain
+}) {
+    const position = {
+        x: originalImageData.width - marginRight - size,
+        y: originalImageData.height - marginBottom - size,
+        width: size,
+        height: size
+    };
+    if (
+        position.x < 0 ||
+        position.y < 0 ||
+        position.x + size > originalImageData.width ||
+        position.y + size > originalImageData.height
+    ) {
+        return null;
+    }
+
+    const originalSpatialScore = computeRegionSpatialCorrelation({
+        imageData: originalImageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size }
+    });
+    if (originalSpatialScore < SMALL_ANCHOR_RELOCATION_MIN_ORIGINAL_SPATIAL) {
+        return null;
+    }
+
+    const originalGradientScore = computeRegionGradientCorrelation({
+        imageData: originalImageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size }
+    });
+    const candidateImageData = cloneImageData(originalImageData);
+    removeWatermark(candidateImageData, alphaMap, position, { alphaGain });
+    const spatialScore = computeRegionSpatialCorrelation({
+        imageData: candidateImageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size }
+    });
+    const gradientScore = computeRegionGradientCorrelation({
+        imageData: candidateImageData,
+        alphaMap,
+        region: { x: position.x, y: position.y, size }
+    });
+    const suppressionGain = originalSpatialScore - spatialScore;
+    if (
+        Math.abs(spatialScore) > SMALL_ANCHOR_RELOCATION_MAX_ACCEPTED_SPATIAL ||
+        gradientScore > SMALL_ANCHOR_RELOCATION_MAX_ACCEPTED_GRADIENT ||
+        suppressionGain < SMALL_ANCHOR_RELOCATION_MIN_SUPPRESSION_GAIN
+    ) {
+        return null;
+    }
+
+    const residualVisibility = assessWatermarkResidualVisibility({
+        imageData: candidateImageData,
+        position,
+        alphaMap
+    });
+    if (residualVisibility.visible) return null;
+
+    return {
+        imageData: candidateImageData,
+        alphaMap,
+        position,
+        config: { logoSize: size, marginRight, marginBottom },
+        alphaGain,
+        originalSpatialScore,
+        originalGradientScore,
+        spatialScore,
+        gradientScore,
+        suppressionGain,
+        residualVisibility,
+        cost: Math.abs(spatialScore) * 0.8 +
+            Math.max(0, gradientScore) * 0.75 +
+            Math.max(0, residualVisibility.positiveHaloLum ?? 0) * 0.01
+    };
+}
+
+function refineSmallFixedLocalAnchorGeometry({
+    originalImageData,
+    currentAlphaMap,
+    currentPosition,
+    currentConfig,
+    currentSource,
+    currentGradientScore,
+    currentResidualVisibility,
+    alpha96,
+    getAlphaMap
+}) {
+    if (!shouldRelocateSmallFixedLocalAnchor({
+        source: currentSource,
+        config: currentConfig,
+        position: currentPosition,
+        currentGradientScore,
+        currentResidualVisibility
+    })) {
+        return null;
+    }
+
+    const currentSize = currentConfig.logoSize ?? currentPosition.width;
+    const currentMarginRight = currentConfig.marginRight;
+    const currentMarginBottom = currentConfig.marginBottom;
+    if (![currentSize, currentMarginRight, currentMarginBottom].every(Number.isFinite)) {
+        return null;
+    }
+
+    let best = null;
+    const minSize = Math.max(SMALL_ANCHOR_RELOCATION_MIN_SIZE, currentSize);
+    const maxSize = Math.min(SMALL_ANCHOR_RELOCATION_MAX_SIZE, currentSize + SMALL_ANCHOR_RELOCATION_SIZE_DELTA);
+    const minMarginRight = Math.max(0, currentMarginRight - SMALL_ANCHOR_RELOCATION_MARGIN_DELTA);
+    const maxMarginRight = currentMarginRight + SMALL_ANCHOR_RELOCATION_MARGIN_DELTA;
+    const minMarginBottom = Math.max(0, currentMarginBottom - SMALL_ANCHOR_RELOCATION_MARGIN_DELTA);
+    const maxMarginBottom = currentMarginBottom + SMALL_ANCHOR_RELOCATION_MARGIN_DELTA;
+
+    for (let size = minSize; size <= maxSize; size++) {
+        const alphaMap = resolveRelocationAlphaMap({
+            size,
+            currentAlphaMap,
+            currentPosition,
+            alpha96,
+            getAlphaMap
+        });
+        if (!alphaMap) continue;
+
+        for (let marginRight = minMarginRight; marginRight <= maxMarginRight; marginRight++) {
+            for (let marginBottom = minMarginBottom; marginBottom <= maxMarginBottom; marginBottom++) {
+                const candidateY = originalImageData.height - marginBottom - size;
+                if (candidateY > currentPosition.y + 1) continue;
+                for (const candidateAlphaGain of ALPHA_GAIN_CANDIDATES) {
+                    const candidate = buildSmallAnchorRelocationCandidate({
+                        originalImageData,
+                        alphaMap,
+                        size,
+                        marginRight,
+                        marginBottom,
+                        alphaGain: candidateAlphaGain
+                    });
+                    if (!candidate) continue;
+                    if (!best || candidate.cost < best.cost) {
+                        best = candidate;
+                    }
+                }
+            }
+        }
+    }
+
+    return best;
+}
+
 export function processWatermarkImageData(imageData, options = {}) {
     const totalStartedAt = nowMs();
     const debugTimingsEnabled = options.debugTimings === true;
@@ -2526,8 +2741,53 @@ export function processWatermarkImageData(imageData, options = {}) {
         source = `${source}+small-preview-refine`;
     }
 
+    const smallFixedLocalResidualVisibility = assessWatermarkResidualVisibility({
+        imageData: finalImageData,
+        position,
+        alphaMap
+    });
+    const smallFixedLocalRelocated = refineSmallFixedLocalAnchorGeometry({
+        originalImageData,
+        currentAlphaMap: alphaMap,
+        currentPosition: position,
+        currentConfig: config,
+        currentSource: source,
+        currentGradientScore: finalProcessedGradientScore,
+        currentResidualVisibility: smallFixedLocalResidualVisibility,
+        alpha96,
+        getAlphaMap: options.getAlphaMap
+    });
+    if (smallFixedLocalRelocated) {
+        recordAlphaAdjustmentStage({
+            stage: 'small-fixed-local-anchor-relocation',
+            fromAlphaGain: alphaGain,
+            toAlphaGain: smallFixedLocalRelocated.alphaGain,
+            beforeSpatialScore: finalProcessedSpatialScore,
+            beforeGradientScore: finalProcessedGradientScore,
+            afterSpatialScore: smallFixedLocalRelocated.spatialScore,
+            afterGradientScore: smallFixedLocalRelocated.gradientScore,
+            suppressionGain: smallFixedLocalRelocated.suppressionGain,
+            cost: smallFixedLocalRelocated.cost,
+            allowSameAlphaGain: true
+        });
+        finalImageData = smallFixedLocalRelocated.imageData;
+        alphaMap = smallFixedLocalRelocated.alphaMap;
+        position = smallFixedLocalRelocated.position;
+        config = smallFixedLocalRelocated.config;
+        alphaGain = smallFixedLocalRelocated.alphaGain;
+        originalSpatialScore = smallFixedLocalRelocated.originalSpatialScore;
+        originalGradientScore = smallFixedLocalRelocated.originalGradientScore;
+        finalProcessedSpatialScore = smallFixedLocalRelocated.spatialScore;
+        finalProcessedGradientScore = smallFixedLocalRelocated.gradientScore;
+        suppressionGain = smallFixedLocalRelocated.suppressionGain;
+        source = `${source}+small-anchor-relocated`;
+    }
+
     const locatedAggressiveStartedAt = nowMs();
-    if (options.locatedAggressiveRemoval !== false) {
+    if (
+        options.locatedAggressiveRemoval !== false &&
+        smallFixedLocalRelocated?.residualVisibility?.visible !== false
+    ) {
         const aggressiveRefined = refineLocatedAggressiveRemoval({
             originalImageData,
             currentImageData: finalImageData,

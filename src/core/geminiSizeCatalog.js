@@ -240,6 +240,35 @@ function createV2SmallVariantConfig(width, height) {
     return x >= 0 && y >= 0 ? config : null;
 }
 
+function createProjectedConfig(baseConfig, scaleX, scaleY, { minLogoSize, maxLogoSize, roundLogoSize = Math.round }) {
+    if (!baseConfig) return null;
+
+    return {
+        logoSize: clamp(
+            roundLogoSize(baseConfig.logoSize * ((scaleX + scaleY) / 2)),
+            minLogoSize,
+            maxLogoSize
+        ),
+        marginRight: Math.max(8, Math.round(baseConfig.marginRight * scaleX)),
+        marginBottom: Math.max(8, Math.round(baseConfig.marginBottom * scaleY)),
+        ...(baseConfig.alphaVariant ? { alphaVariant: baseConfig.alphaVariant } : {})
+    };
+}
+
+function getNearOfficialProjectionConfigs(entry, baseConfig) {
+    const configs = [{ config: baseConfig, family: 'near-official-projected', source: `${entry.width}x${entry.height}` }];
+    if (entry?.modelFamily === 'gemini-3.x-image' && entry.resolutionTier === '1k') {
+        configs.push({
+            config: GEMINI_3X_CURRENT_1K_LARGE_MARGIN_WATERMARK_CONFIG,
+            family: 'near-official-current-large-margin',
+            source: `${entry.width}x${entry.height}-large-margin`,
+            roundLogoSize: Math.ceil
+        });
+    }
+
+    return configs;
+}
+
 export function matchOfficialGeminiImageSize(width, height) {
     const normalizedWidth = normalizeDimension(width);
     const normalizedHeight = normalizeDimension(height);
@@ -389,9 +418,9 @@ export function resolveOfficialGeminiSearchConfigEntries(
     // this only proposes search seeds; later validation still decides safety.
     const targetAspectRatio = normalizedWidth / normalizedHeight;
     const candidates = OFFICIAL_GEMINI_IMAGE_SIZES
-        .map((entry) => {
+        .flatMap((entry) => {
             const baseConfig = getEntryConfig(entry);
-            if (!baseConfig) return null;
+            if (!baseConfig) return [];
 
             const scaleX = normalizedWidth / entry.width;
             const scaleY = normalizedHeight / entry.height;
@@ -400,35 +429,39 @@ export function resolveOfficialGeminiSearchConfigEntries(
             const relativeAspectRatioDelta = Math.abs(targetAspectRatio - entryAspectRatio) / entryAspectRatio;
             const scaleMismatchRatio = Math.abs(scaleX - scaleY) / Math.max(scaleX, scaleY);
 
-            if (relativeAspectRatioDelta > maxRelativeAspectRatioDelta) return null;
-            if (scaleMismatchRatio > maxScaleMismatchRatio) return null;
+            if (relativeAspectRatioDelta > maxRelativeAspectRatioDelta) return [];
+            if (scaleMismatchRatio > maxScaleMismatchRatio) return [];
 
-            const config = {
-                logoSize: clamp(Math.round(baseConfig.logoSize * scale), minLogoSize, maxLogoSize),
-                marginRight: Math.max(8, Math.round(baseConfig.marginRight * scaleX)),
-                marginBottom: Math.max(8, Math.round(baseConfig.marginBottom * scaleY))
-            };
+            return getNearOfficialProjectionConfigs(entry, baseConfig)
+                .map((projection) => {
+                    const config = createProjectedConfig(projection.config, scaleX, scaleY, {
+                        minLogoSize,
+                        maxLogoSize,
+                        roundLogoSize: projection.roundLogoSize
+                    });
 
-            const x = normalizedWidth - config.marginRight - config.logoSize;
-            const y = normalizedHeight - config.marginBottom - config.logoSize;
-            if (x < 0 || y < 0) return null;
+                    const x = normalizedWidth - config.marginRight - config.logoSize;
+                    const y = normalizedHeight - config.marginBottom - config.logoSize;
+                    if (x < 0 || y < 0) return null;
 
-            return {
-                config,
-                metadata: {
-                    family: 'near-official-projected',
-                    sourcePriority: 4,
-                    evidenceGate: 'required',
-                    modelFamily: entry.modelFamily,
-                    resolutionTier: entry.resolutionTier,
-                    aspectRatio: entry.aspectRatio,
-                    source: `${entry.width}x${entry.height}`
-                },
-                score:
-                    relativeAspectRatioDelta * 100 +
-                    scaleMismatchRatio * 20 +
-                    Math.abs(Math.log2(Math.max(scale, 1e-6)))
-            };
+                    return {
+                        config,
+                        metadata: {
+                            family: projection.family,
+                            sourcePriority: 4,
+                            evidenceGate: 'required',
+                            modelFamily: entry.modelFamily,
+                            resolutionTier: entry.resolutionTier,
+                            aspectRatio: entry.aspectRatio,
+                            source: projection.source
+                        },
+                        score:
+                            relativeAspectRatioDelta * 100 +
+                            scaleMismatchRatio * 20 +
+                            Math.abs(Math.log2(Math.max(scale, 1e-6)))
+                    };
+                })
+                .filter(Boolean);
         })
         .filter(Boolean)
         .sort((a, b) => a.score - b.score);

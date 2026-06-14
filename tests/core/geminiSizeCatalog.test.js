@@ -150,6 +150,19 @@ test('resolveOfficialGeminiSearchConfigs should map near-official portrait dimen
     });
 });
 
+test('resolveOfficialGeminiSearchConfigs should project near-official current large-margin anchors', () => {
+    const configs = resolveOfficialGeminiSearchConfigs(1024, 768);
+
+    assert.ok(
+        configs.some((config) => (
+            config.logoSize === 42 &&
+            config.marginRight === 82 &&
+            config.marginBottom === 82
+        )),
+        `configs=${JSON.stringify(configs)}`
+    );
+});
+
 test('resolveGeminiWatermarkSearchConfigs should keep default config first and dedupe identical catalog matches', () => {
     const configs = resolveGeminiWatermarkSearchConfigs(768, 1376, {
         logoSize: 48,
