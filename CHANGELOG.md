@@ -11,6 +11,8 @@
 
 - Added regression coverage for intermittent low-contrast Veo text evidence.
 - Re-verified the new 720p, 720x1280, and Veo text sample set through the local video UI preset exporter.
+- Published the npm package, GitHub Release assets, userscript artifact, and Chrome extension fallback zip for `v1.0.24`.
+- Synced the official website to the `1.0.24` package and release assets. A website-only follow-up now version-tags the video runtime script URL so the fixed runtime path cannot keep serving stale cached JavaScript after a site deploy.
 
 ## 1.0.23 - 2026-06-14
 

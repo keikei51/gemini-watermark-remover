@@ -11,6 +11,8 @@
 
 - 新增间歇性低对比度 Veo 文字证据的回归测试。
 - 重新通过本地视频 UI preset 导出器验证新增的 720p、720x1280 和 Veo 文字样例集。
+- 已发布 `v1.0.24` 的 npm 包、GitHub Release 资产、userscript 产物和 Chrome 插件备用 zip。
+- 官网已同步到 `1.0.24` 包和 release 资产。官网侧另做了一次 follow-up：为视频 runtime 脚本 URL 加上内容版本参数，避免站点部署后固定 runtime 路径继续命中旧 JavaScript 缓存。
 
 ## 1.0.23 - 2026-06-14
 
