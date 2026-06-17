@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.25 - 2026-06-17
+
+### Watermark Removal
+
+- Fixed the 2026-06-16 Gemini sample by keeping canonical 96px bottom-right evidence ahead of weak inward candidates and avoiding dark over-removal on textured backgrounds.
+- Added conservative smooth-prior cleanup for shallow off-catalog residuals so light star overlays can be reduced without turning into dark artifacts.
+
+### Quality
+
+- Added regression coverage for the new bug image and bounded weak-residual outcomes.
+- Re-verified the external Gemini watermark sample set with 188 of 190 samples passing and no newly failing samples.
+- Published this patch as `v1.0.25` because the earlier npm `1.0.24` tarball is immutable and predates this bug fix.
+
 ## 1.0.24 - 2026-06-16
 
 ### Video
