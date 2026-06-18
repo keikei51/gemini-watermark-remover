@@ -23,20 +23,20 @@ import {
 } from './shared/debugFileHandoff.js';
 
 const TEXT = {
-    loading: '正在加载资源...',
+    loading: '正在加載資源...',
     size: '尺寸',
-    watermark: '检测到的水印',
+    watermark: '檢測到的水印',
     position: '位置',
-    status: '状态',
+    status: '狀態',
     removed: '水印已移除',
-    skipped: '未检测到可移除水印，已保留原图',
-    unsupported: '浏览器不支持复制图片',
-    copied: '已复制！',
-    copy: '复制结果',
-    copyFailed: '复制失败',
-    unsupportedFile: '请选择 JPG、PNG、WebP 图片，或 MP4/WebM/MOV 视频。',
-    fileTooLarge: '图片调试入口暂不处理超过 20MB 的图片。视频会进入视频调试页。',
-    handoffVideo: '正在进入视频调试流程...'
+    skipped: '未檢測到可移除水印，已保留原圖',
+    unsupported: '瀏覽器不支持復制圖片',
+    copied: '已復制！',
+    copy: '復制結果',
+    copyFailed: '復制失敗',
+    unsupportedFile: '請選擇 JPG、PNG、WebP 圖片，或 MP4/WebM/MOV 視頻。',
+    fileTooLarge: '圖片調試入口暫不處理超過 20MB 的圖片。視頻會進入視頻調試頁。',
+    handoffVideo: '正在進入視頻調試流程...'
 };
 
 let enginePromise = null;
